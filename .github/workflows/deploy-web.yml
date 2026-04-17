@@ -1,0 +1,60 @@
+name: Deploy Web to Cloud Run
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/web/**"
+      - ".github/workflows/deploy-web.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Discover backend URL
+        id: backend
+        run: |
+          URL=$(gcloud run services describe deal-scout-api --region ${{ secrets.GCP_REGION }} --project ${{ secrets.GCP_PROJECT_ID }} --format='value(status.url)' || true)
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      - name: Write build-time env
+        run: |
+          mkdir -p apps/web
+          : > apps/web/.env.production
+          echo "VITE_API_BASE_URL=${{ steps.backend.outputs.url }}" >> apps/web/.env.production
+          echo "VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}" >> apps/web/.env.production
+          echo "VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}" >> apps/web/.env.production
+          echo "VITE_FIREBASE_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}" >> apps/web/.env.production
+          echo "VITE_FIREBASE_STORAGE_BUCKET=${{ secrets.VITE_FIREBASE_STORAGE_BUCKET }}" >> apps/web/.env.production
+          echo "VITE_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.VITE_FIREBASE_MESSAGING_SENDER_ID }}" >> apps/web/.env.production
+          echo "VITE_FIREBASE_APP_ID=${{ secrets.VITE_FIREBASE_APP_ID }}" >> apps/web/.env.production
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: deal-scout
+          source: apps/web
+          region: ${{ secrets.GCP_REGION }}
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          flags: "--allow-unauthenticated --port=8080"
+
+      - name: Show URL
+        run: echo "Web URL ${{ steps.deploy.outputs.url }}"
