@@ -1,0 +1,28 @@
+{
+  "name": "deal-scout",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Deal Scout app scaffold for Cloud Run zero-click deploys via Buildpacks.",
+  "type": "module",
+  "engines": {
+    "node": "20.x"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "start": "serve -s dist -l tcp://0.0.0.0:$PORT"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "serve": "^14.2.4"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
