@@ -12,8 +12,8 @@ def _csv(name: str, default: str = "") -> list[str]:
 
 @dataclass(frozen=True)
 class Settings:
-    anthropic_api_key: str
-    anthropic_model: str
+    gemini_api_key: str
+    gemini_model: str
     firebase_project_id: str
     firebase_storage_bucket: str
     allowed_origins: list[str]
@@ -23,8 +23,8 @@ class Settings:
 
 def load_settings() -> Settings:
     return Settings(
-        anthropic_api_key=os.getenv("GEMINI_API_KEY", ""),
-        anthropic_model=os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
+        gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
         firebase_project_id=os.getenv("FIREBASE_PROJECT_ID", "reais---prospecter"),
         firebase_storage_bucket=os.getenv("FIREBASE_STORAGE_BUCKET", "reais---prospecter.appspot.com"),
         allowed_origins=_csv(
