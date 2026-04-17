@@ -1,0 +1,29 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAllowed() {
+      return request.auth != null && request.auth.token.email_verified == true
+        && (
+          request.auth.token.email == 'pinekrone@gmail.com'
+          || request.auth.token.email.matches('.*@realestateaistudio[.]com$')
+        );
+    }
+
+    match /buildings/{doc=**} {
+      allow read, write: if isAllowed();
+    }
+    match /contacts/{doc=**} {
+      allow read, write: if isAllowed();
+    }
+    match /deals/{doc=**} {
+      allow read, write: if isAllowed();
+    }
+    match /underwriting/{doc=**} {
+      allow read, write: if isAllowed();
+    }
+    match /om_ingestions/{doc=**} {
+      allow read, write: if isAllowed();
+    }
+  }
+}

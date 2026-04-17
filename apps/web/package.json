@@ -1,8 +1,7 @@
 {
-  "name": "deal-scout",
+  "name": "crm-web",
   "private": true,
   "version": "0.1.0",
-  "description": "Deal Scout app scaffold for Cloud Run zero-click deploys via Buildpacks.",
   "type": "module",
   "engines": {
     "node": "22.x"
@@ -14,15 +13,20 @@
     "start": "serve -s dist -l tcp://0.0.0.0:$PORT"
   },
   "dependencies": {
+    "firebase": "^10.14.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
+    "react-router-dom": "^6.27.0",
     "serve": "^14.2.4"
   },
   "devDependencies": {
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@types/react": "^18.3.11",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.2",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.8"
   }
 }

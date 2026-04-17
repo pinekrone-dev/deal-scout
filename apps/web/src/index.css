@@ -1,0 +1,43 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root { height: 100%; }
+  body { font-feature-settings: "ss01", "cv11"; }
+  input, select, textarea, button { font: inherit; }
+  table { border-collapse: separate; border-spacing: 0; }
+}
+
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded border border-ink-200 bg-white px-3 py-1.5 text-sm font-medium text-ink-800 shadow-sm hover:bg-ink-50 disabled:opacity-50 disabled:cursor-not-allowed transition;
+  }
+  .btn-primary {
+    @apply btn border-accent-600 bg-accent-600 text-white hover:bg-accent-500;
+  }
+  .btn-ghost {
+    @apply btn border-transparent bg-transparent shadow-none hover:bg-ink-100;
+  }
+  .field {
+    @apply block w-full rounded border border-ink-200 bg-white px-2 py-1 text-sm text-ink-900 shadow-sm focus:border-accent-500 focus:outline-none focus:ring-1 focus:ring-accent-500;
+  }
+  .label {
+    @apply block text-xs font-medium uppercase tracking-wide text-ink-500 mb-1;
+  }
+  .card {
+    @apply rounded-lg border border-ink-200 bg-white shadow-sm;
+  }
+  .pill {
+    @apply inline-flex items-center rounded-full border border-ink-200 bg-ink-50 px-2 py-0.5 text-xs font-medium text-ink-700;
+  }
+  .th {
+    @apply sticky top-0 z-10 bg-ink-100 px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wide text-ink-600 border-b border-ink-200;
+  }
+  .td {
+    @apply px-2 py-1 text-sm text-ink-800 border-b border-ink-100;
+  }
+  .num {
+    @apply font-mono tabular-nums text-right;
+  }
+}
