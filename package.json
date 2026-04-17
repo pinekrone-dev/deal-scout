@@ -5,7 +5,7 @@
   "description": "Deal Scout app scaffold for Cloud Run zero-click deploys via Buildpacks.",
   "type": "module",
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   },
   "scripts": {
     "dev": "vite",
