@@ -78,21 +78,34 @@ export default function BuildingDetailPage() {
     const q = query(
       collection(db, 'underwriting'),
       where('owner_uid', '==', user.uid),
-      where('building_id', '==', id),
-      orderBy('version', 'desc')
+      where('building_id', '==', id)
     );
     const unsub = onSnapshot(
       q,
       (snap) => {
         if (!snap.empty) {
-          const d = snap.docs[0];
-          setUnderwriting({ id: d.id, ...(d.data() as Underwriting) });
+          // Pick the highest-version doc client-side.
+          let best: Underwriting | null = null;
+          let bestV = -1;
+          snap.forEach((d) => {
+            const data = d.data() as Underwriting;
+            const v = typeof data.version === 'number' ? data.version : 0;
+            if (v > bestV) {
+              bestV = v;
+              best = { id: d.id, ...data };
+            }
+          });
+          setUnderwriting(best);
         } else {
           setUnderwriting(null);
         }
         setUwLoading(false);
       },
-      () => { setUwLoading(false); }
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.error('underwriting query failed', err);
+        setUwLoading(false);
+      }
     );
     return () => unsub();
   }, [id, user]);

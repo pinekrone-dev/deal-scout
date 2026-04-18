@@ -15,16 +15,24 @@ export default function ContactsPage() {
 
   useEffect(() => {
     if (!user) return;
-    const q = query(
-      collection(db, 'contacts'),
-      where('owner_uid', '==', user.uid),
-      orderBy('updated_at', 'desc')
+    const q = query(collection(db, 'contacts'), where('owner_uid', '==', user.uid));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const out: Row[] = [];
+        snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Contact) }));
+        out.sort((a, b) => {
+          const au = a.updated_at ? (typeof a.updated_at === 'number' ? a.updated_at : (a.updated_at as any).toMillis?.() ?? 0) : 0;
+          const bu = b.updated_at ? (typeof b.updated_at === 'number' ? b.updated_at : (b.updated_at as any).toMillis?.() ?? 0) : 0;
+          return bu - au;
+        });
+        setRows(out);
+      },
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.error('contacts query failed', err);
+      }
     );
-    const unsub = onSnapshot(q, (snap) => {
-      const out: Row[] = [];
-      snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Contact) }));
-      setRows(out);
-    });
     return () => unsub();
   }, [user]);
 

@@ -45,6 +45,9 @@ export type Building = {
   notes?: string;
   photos?: string[];
   documents?: string[];
+  lat?: number;
+  lng?: number;
+  owner_uid?: string;
   created_at?: number;
   updated_at?: number;
 };

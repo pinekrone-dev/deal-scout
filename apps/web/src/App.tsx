@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/auth';
 import Shell from './components/Shell';
 import LoginPage from './pages/LoginPage';
+import DashboardPage from './pages/DashboardPage';
 import BuildingsPage from './pages/BuildingsPage';
 import BuildingDetailPage from './pages/BuildingDetailPage';
 import ContactsPage from './pages/ContactsPage';
@@ -36,7 +37,7 @@ export default function App() {
             </Protected>
           }
         >
-          <Route index element={<Navigate to="/buildings" replace />} />
+          <Route index element={<DashboardPage />} />
           <Route path="/buildings" element={<BuildingsPage />} />
           <Route path="/buildings/:id" element={<BuildingDetailPage />} />
           <Route path="/contacts" element={<ContactsPage />} />

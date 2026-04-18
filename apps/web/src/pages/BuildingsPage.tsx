@@ -21,16 +21,26 @@ export default function BuildingsPage() {
 
   useEffect(() => {
     if (!user) return;
-    const q = query(
-      collection(db, 'buildings'),
-      where('owner_uid', '==', user.uid),
-      orderBy('updated_at', 'desc')
+    // No orderBy here — that would require a composite index when combined with
+    // the owner_uid filter. Sort client-side instead.
+    const q = query(collection(db, 'buildings'), where('owner_uid', '==', user.uid));
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        const out: Row[] = [];
+        snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Building) }));
+        out.sort((a, b) => {
+          const au = a.updated_at ? (typeof a.updated_at === 'number' ? a.updated_at : (a.updated_at as any).toMillis?.() ?? 0) : 0;
+          const bu = b.updated_at ? (typeof b.updated_at === 'number' ? b.updated_at : (b.updated_at as any).toMillis?.() ?? 0) : 0;
+          return bu - au;
+        });
+        setRows(out);
+      },
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.error('buildings query failed', err);
+      }
     );
-    const unsub = onSnapshot(q, (snap) => {
-      const out: Row[] = [];
-      snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Building) }));
-      setRows(out);
-    });
     return () => unsub();
   }, [user]);
 
