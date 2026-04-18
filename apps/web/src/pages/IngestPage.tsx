@@ -5,6 +5,40 @@ import type { AssetClass, Contact } from '../types';
 import { ASSET_CLASSES } from '../types';
 import { parseNum } from '../lib/format';
 
+type RentRollRow = {
+  unit?: string;
+  unit_type?: string;
+  sf?: number;
+  rent?: number;
+  status?: 'occupied' | 'vacant' | 'model' | 'down';
+  lease_end?: string;
+};
+
+type LeaseRollRow = {
+  tenant?: string;
+  suite?: string;
+  sf?: number;
+  rent_psf?: number;
+  start?: string;
+  expiration?: string;
+  options?: string;
+  recovery?: string;
+};
+
+type ExtractedAssumptions = {
+  rent_growth_pct?: number;
+  vacancy_pct?: number;
+  expense_growth_pct?: number;
+  mgmt_fee_pct?: number;
+  capex_reserve_per_unit?: number;
+  ti_lc_reserve_per_sf?: number;
+  exit_cap?: number;
+  hold_years?: number;
+  ltv?: number;
+  rate?: number;
+  amort_years?: number;
+};
+
 type Extracted = {
   building?: {
     address?: string;
@@ -39,6 +73,9 @@ type Extracted = {
       expenses?: Array<{ label: string; amounts: number[] }>;
     };
   };
+  assumptions?: ExtractedAssumptions;
+  rent_roll?: RentRollRow[];
+  lease_roll?: LeaseRollRow[];
 };
 
 export default function IngestPage() {
@@ -122,6 +159,10 @@ export default function IngestPage() {
   const b = extracted?.building ?? {};
   const contacts = extracted?.contacts ?? [];
   const fin = extracted?.financials ?? {};
+  const rentRoll = extracted?.rent_roll ?? [];
+  const leaseRoll = extracted?.lease_roll ?? [];
+  const assumptions = extracted?.assumptions ?? {};
+  const hasAssumptions = Object.keys(assumptions).length > 0;
 
   return (
     <div className="space-y-4">
@@ -218,6 +259,112 @@ export default function IngestPage() {
         </div>
       </div>
 
+      {hasAssumptions ? (
+        <div className="card p-4 space-y-2">
+          <div className="font-semibold">Assumptions (from OM)</div>
+          <div className="text-xs text-ink-500">
+            These override the asset-class defaults on the Underwriting &rarr; Assumptions tab.
+            Anything the OM didn't specify will use the standard default for this asset class.
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-x-4 gap-y-1 text-sm">
+            {formatAssumption('Rent growth', assumptions.rent_growth_pct, 'pct')}
+            {formatAssumption('Vacancy', assumptions.vacancy_pct, 'pct')}
+            {formatAssumption('Expense growth', assumptions.expense_growth_pct, 'pct')}
+            {formatAssumption('Mgmt fee', assumptions.mgmt_fee_pct, 'pct')}
+            {formatAssumption('Exit cap', assumptions.exit_cap, 'pct')}
+            {formatAssumption('LTV', assumptions.ltv, 'pct')}
+            {formatAssumption('Interest rate', assumptions.rate, 'pct')}
+            {formatAssumption('Hold years', assumptions.hold_years, 'int')}
+            {formatAssumption('Amort years', assumptions.amort_years, 'int')}
+            {formatAssumption('CapEx / unit', assumptions.capex_reserve_per_unit, 'usd')}
+            {formatAssumption('TI/LC / SF', assumptions.ti_lc_reserve_per_sf, 'usd')}
+          </div>
+        </div>
+      ) : null}
+
+      {rentRoll.length > 0 ? (
+        <div className="card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold">Rent Roll (from OM)</div>
+            <span className="pill">{rentRoll.length} units</span>
+          </div>
+          <div className="text-xs text-ink-500">
+            Will populate the Underwriting &rarr; Rent Roll tab. Edit individual units from the building page after confirming.
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-ink-500 border-b border-ink-100">
+                  <th className="py-1 pr-2">Unit</th>
+                  <th className="py-1 pr-2">Type</th>
+                  <th className="py-1 pr-2 num">SF</th>
+                  <th className="py-1 pr-2 num">Rent</th>
+                  <th className="py-1 pr-2">Status</th>
+                  <th className="py-1 pr-2">Lease end</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rentRoll.slice(0, 12).map((r, i) => (
+                  <tr key={i} className="border-b border-ink-50">
+                    <td className="py-1 pr-2">{r.unit ?? ''}</td>
+                    <td className="py-1 pr-2">{r.unit_type ?? ''}</td>
+                    <td className="py-1 pr-2 num">{r.sf ? r.sf.toLocaleString() : ''}</td>
+                    <td className="py-1 pr-2 num">{r.rent ? Math.round(r.rent).toLocaleString() : ''}</td>
+                    <td className="py-1 pr-2">{r.status ?? ''}</td>
+                    <td className="py-1 pr-2">{r.lease_end ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {rentRoll.length > 12 ? (
+              <div className="text-xs text-ink-500 mt-1">+{rentRoll.length - 12} more units...</div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {leaseRoll.length > 0 ? (
+        <div className="card p-4 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="font-semibold">Lease Roll (from OM)</div>
+            <span className="pill">{leaseRoll.length} tenants</span>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-ink-500 border-b border-ink-100">
+                  <th className="py-1 pr-2">Tenant</th>
+                  <th className="py-1 pr-2">Suite</th>
+                  <th className="py-1 pr-2 num">SF</th>
+                  <th className="py-1 pr-2 num">$/SF</th>
+                  <th className="py-1 pr-2">Start</th>
+                  <th className="py-1 pr-2">Exp</th>
+                  <th className="py-1 pr-2">Options</th>
+                  <th className="py-1 pr-2">Rec</th>
+                </tr>
+              </thead>
+              <tbody>
+                {leaseRoll.slice(0, 12).map((l, i) => (
+                  <tr key={i} className="border-b border-ink-50">
+                    <td className="py-1 pr-2">{l.tenant ?? ''}</td>
+                    <td className="py-1 pr-2">{l.suite ?? ''}</td>
+                    <td className="py-1 pr-2 num">{l.sf ? l.sf.toLocaleString() : ''}</td>
+                    <td className="py-1 pr-2 num">{l.rent_psf ? l.rent_psf.toFixed(2) : ''}</td>
+                    <td className="py-1 pr-2">{l.start ?? ''}</td>
+                    <td className="py-1 pr-2">{l.expiration ?? ''}</td>
+                    <td className="py-1 pr-2">{l.options ?? ''}</td>
+                    <td className="py-1 pr-2">{l.recovery ?? ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {leaseRoll.length > 12 ? (
+              <div className="text-xs text-ink-500 mt-1">+{leaseRoll.length - 12} more tenants...</div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       <div className="flex items-center gap-3">
         <button className="btn-primary" onClick={confirm} disabled={saving || !b.address}>
           {saving ? 'Saving...' : 'Confirm and Create'}
@@ -250,6 +397,20 @@ function NumField({ label, value, onChange }: { label: string; value: number | u
         value={value ?? ''}
         onChange={(e) => onChange(parseNum(e.target.value))}
       />
+    </div>
+  );
+}
+
+function formatAssumption(label: string, value: number | undefined, kind: 'pct' | 'int' | 'usd') {
+  if (value === undefined || value === null || Number.isNaN(value)) return null;
+  let rendered: string;
+  if (kind === 'pct') rendered = `${(Number(value) * 100).toFixed(2)}%`;
+  else if (kind === 'int') rendered = String(Math.round(Number(value)));
+  else rendered = `$${Math.round(Number(value)).toLocaleString()}`;
+  return (
+    <div className="flex justify-between border-b border-ink-50 py-0.5">
+      <span className="text-ink-500">{label}</span>
+      <span className="num">{rendered}</span>
     </div>
   );
 }

@@ -68,7 +68,42 @@ Fields to extract (omit any that are not present; never invent values):
       "revenue": [ { "label": string, "amounts": [number, ... 12 numbers] } ],
       "expenses": [ { "label": string, "amounts": [number, ... 12 numbers] } ]
     }
-  }
+  },
+  "assumptions": {
+    "rent_growth_pct": number 0..1 (e.g. 0.03),
+    "vacancy_pct": number 0..1,
+    "expense_growth_pct": number 0..1,
+    "mgmt_fee_pct": number 0..1,
+    "capex_reserve_per_unit": number in USD per unit/key per year,
+    "ti_lc_reserve_per_sf": number in USD per SF per year (office/retail/industrial only),
+    "exit_cap": number 0..1,
+    "hold_years": integer (e.g. 5, 7, 10),
+    "ltv": number 0..1,
+    "rate": number 0..1,
+    "amort_years": integer (e.g. 30)
+  },
+  "rent_roll": [
+    {
+      "unit": string,
+      "unit_type": string (e.g. "1BR/1BA", "studio", "2BR/2BA"),
+      "sf": integer,
+      "rent": number (monthly in-place rent in USD),
+      "status": one of ["occupied","vacant","model","down"],
+      "lease_end": string (YYYY-MM-DD or YYYY-MM if given)
+    }
+  ],
+  "lease_roll": [
+    {
+      "tenant": string,
+      "suite": string,
+      "sf": integer,
+      "rent_psf": number (annual $ per SF),
+      "start": string (YYYY-MM-DD),
+      "expiration": string (YYYY-MM-DD),
+      "options": string (e.g. "2x5yr"),
+      "recovery": string (e.g. "NNN","MG","FS")
+    }
+  ]
 }
 
 Rules:

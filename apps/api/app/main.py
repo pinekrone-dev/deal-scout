@@ -233,6 +233,150 @@ def _derive_proforma_monthly(
     }
 
 
+def _spread_annual_to_monthly(
+    annual: dict[str, Any] | None,
+    months: list[str] | None = None,
+    source: str = "derived",
+) -> dict[str, Any] | None:
+    """Spread an annual {revenue, expenses} statement evenly across 12 months so
+    the Underwriting UI always has a monthly grid to display. Returns None when
+    annual has no data."""
+    if not annual:
+        return None
+    rev_in = annual.get("revenue") or []
+    exp_in = annual.get("expenses") or []
+    if not rev_in and not exp_in:
+        return None
+    if not months or len(months) != 12:
+        months = [""] * 12
+
+    def _to_monthly(lines: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for li in lines:
+            label = str(li.get("label") or "unlabeled")
+            amt = _num_or_none(li.get("amount")) or 0.0
+            per_month = round(float(amt) / 12.0, 2)
+            out.append({"label": label, "amounts": [per_month] * 12})
+        return out
+
+    return {
+        "months": list(months),
+        "revenue": _to_monthly(rev_in),
+        "expenses": _to_monthly(exp_in),
+        "source": source,
+    }
+
+
+def _advance_months(months: list[str] | None) -> list[str]:
+    """Advance each YYYY-MM slot by 12 months. Empty slots stay empty."""
+    if not months:
+        return [""] * 12
+    out: list[str] = []
+    for ym in months:
+        s = str(ym or "").strip()
+        if not s or "-" not in s:
+            out.append("")
+            continue
+        try:
+            y, m = s.split("-")
+            out.append(f"{int(y) + 1}-{m}")
+        except Exception:
+            out.append("")
+    if len(out) < 12:
+        out = out + [""] * (12 - len(out))
+    return out[:12]
+
+
+_ASSUMPTION_KEYS: tuple[str, ...] = (
+    "rent_growth_pct",
+    "vacancy_pct",
+    "expense_growth_pct",
+    "mgmt_fee_pct",
+    "capex_reserve_per_unit",
+    "ti_lc_reserve_per_sf",
+    "exit_cap",
+    "hold_years",
+    "ltv",
+    "rate",
+    "amort_years",
+)
+
+
+def _clean_assumptions(raw: Any) -> dict[str, float]:
+    """Coerce a user- or OM-supplied assumptions dict to clean floats/ints.
+    Unknown keys are dropped; missing keys are simply not returned so the caller
+    can merge on top of `default_assumptions(asset_class)`."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, float] = {}
+    for k in _ASSUMPTION_KEYS:
+        if k not in raw:
+            continue
+        v = _num_or_none(raw.get(k))
+        if v is None:
+            continue
+        if k in ("hold_years", "amort_years"):
+            try:
+                out[k] = int(v)
+            except Exception:
+                continue
+        else:
+            out[k] = float(v)
+    return out
+
+
+def _clean_rent_roll(raw: Any) -> list[dict[str, Any]]:
+    """Normalize an OM rent roll to a list of {unit, unit_type, sf, rent, status, lease_end}."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        unit = str(r.get("unit") or "").strip()
+        unit_type = str(r.get("unit_type") or "").strip()
+        sf = _num_or_none(r.get("sf"))
+        rent = _num_or_none(r.get("rent"))
+        status = str(r.get("status") or "").strip().lower() or None
+        if status and status not in {"occupied", "vacant", "model", "down"}:
+            status = None
+        lease_end = str(r.get("lease_end") or "").strip() or None
+        row = _clean_doc({
+            "unit": unit or None,
+            "unit_type": unit_type or None,
+            "sf": sf,
+            "rent": rent,
+            "status": status,
+            "lease_end": lease_end,
+        })
+        if row:
+            out.append(row)
+    return out
+
+
+def _clean_lease_roll(raw: Any) -> list[dict[str, Any]]:
+    """Normalize a commercial lease roll for office / retail / industrial OMs."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for r in raw:
+        if not isinstance(r, dict):
+            continue
+        row = _clean_doc({
+            "tenant": (str(r.get("tenant") or "").strip() or None),
+            "suite": (str(r.get("suite") or "").strip() or None),
+            "sf": _num_or_none(r.get("sf")),
+            "rent_psf": _num_or_none(r.get("rent_psf")),
+            "start": (str(r.get("start") or "").strip() or None),
+            "expiration": (str(r.get("expiration") or "").strip() or None),
+            "options": (str(r.get("options") or "").strip() or None),
+            "recovery": (str(r.get("recovery") or "").strip() or None),
+        })
+        if row:
+            out.append(row)
+    return out
+
+
 def _deep_clean(v: Any) -> Any:
     if v is None:
         return None
@@ -595,13 +739,14 @@ def confirm_ingest(
         ttm = _clean_statement(ttm_raw)
 
         # Monthly breakdowns (when the OM provides them). We clean them first
-        # so we can use the TTM monthly totals to back-fill the annual TTM if
-        # the model only returned a monthly grid.
+        # so we can use the TTM monthly totals as the source of truth for the
+        # annual TTM when both are present (the monthly grid is typically the
+        # original source in the OM's financial package).
         ttm_monthly = _clean_monthly_statement(financials.get("ttm_monthly"), source="om")
-        if ttm_monthly and not (ttm.get("revenue") or ttm.get("expenses")):
-            backfilled = _monthly_to_annual_totals(ttm_monthly)
-            if backfilled:
-                ttm = _clean_statement(backfilled)
+        if ttm_monthly:
+            reconciled = _monthly_to_annual_totals(ttm_monthly)
+            if reconciled and (reconciled.get("revenue") or reconciled.get("expenses")):
+                ttm = _clean_statement(reconciled)
 
         try:
             ttm["noi"] = float(compute_noi(ttm))
@@ -620,13 +765,29 @@ def confirm_ingest(
         else:
             ttm_period = {}
 
+        # Merge any OM-extracted assumptions on top of asset-class defaults so
+        # the user always starts from a complete set of values on the
+        # Underwriting -> Assumptions tab, even when the OM was silent.
         assumptions = default_assumptions(asset_class)
+        om_assumptions = _clean_assumptions(payload.get("assumptions"))
+        if om_assumptions:
+            assumptions = {**assumptions, **om_assumptions}
+
+        # If we have annual TTM but no monthly grid, synthesize one so the
+        # Underwriting 12-Month Proforma tab is always populated.
+        if not ttm_monthly and (ttm.get("revenue") or ttm.get("expenses")):
+            ttm_monthly = _spread_annual_to_monthly(
+                ttm, months=None, source="derived"
+            )
 
         # Prefer the OM's own 12-month proforma when it provides one. Otherwise
-        # derive it from TTM monthly (if we have it) or from annual TTM.
+        # derive it from TTM monthly (now always present if any TTM exists).
         proforma_monthly = _clean_monthly_statement(financials.get("proforma_12mo"), source="om")
         if not proforma_monthly and ttm_monthly:
             proforma_monthly = _derive_proforma_monthly(ttm_monthly, assumptions)
+
+        rent_roll = _clean_rent_roll(payload.get("rent_roll"))
+        lease_roll = _clean_lease_roll(payload.get("lease_roll"))
 
         uw_id: str | None = None
         try:
@@ -650,6 +811,8 @@ def confirm_ingest(
                 "proforma_12mo": proforma,
                 "proforma_12mo_monthly": proforma_monthly,
                 "assumptions": assumptions,
+                "rent_roll": rent_roll,
+                "lease_roll": lease_roll,
                 "returns": _safe_returns(returns),
                 "version": 1,
                 "created_at": gcfs.SERVER_TIMESTAMP,
@@ -671,6 +834,8 @@ def confirm_ingest(
                     "proforma_12mo": {"revenue": [], "expenses": [], "noi": 0.0},
                     "proforma_12mo_monthly": proforma_monthly,
                     "assumptions": assumptions,
+                    "rent_roll": rent_roll,
+                    "lease_roll": lease_roll,
                     "returns": {"irr": None, "equity_multiple": None, "coc_yr1": None, "dscr": None},
                     "version": 1,
                     "created_at": gcfs.SERVER_TIMESTAMP,
