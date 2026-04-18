@@ -102,6 +102,52 @@ def _clean_doc(d: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _clean_line_items(items: Any) -> list[dict[str, Any]]:
+    """Sanitize a list of {label, amount} line items. Coerces amounts, drops junk."""
+    if not isinstance(items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for li in items:
+        if not isinstance(li, dict):
+            continue
+        label = li.get("label")
+        label = str(label).strip() if label is not None else ""
+        amt = _num_or_none(li.get("amount"))
+        if amt is None:
+            amt = 0
+        out.append({"label": label or "unlabeled", "amount": amt})
+    return out
+
+
+def _clean_statement(stmt: Any) -> dict[str, Any]:
+    """Sanitize a revenue/expenses statement into a shape safe for math + Firestore."""
+    if not isinstance(stmt, dict):
+        return {"revenue": [], "expenses": []}
+    return {
+        "revenue": _clean_line_items(stmt.get("revenue")),
+        "expenses": _clean_line_items(stmt.get("expenses")),
+    }
+
+
+def _deep_clean(v: Any) -> Any:
+    """Recursively remove None/NaN/Inf; keep lists/dicts otherwise."""
+    if v is None:
+        return None
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if isinstance(v, dict):
+        out: dict[str, Any] = {}
+        for k, x in v.items():
+            cleaned = _deep_clean(x)
+            if cleaned is None:
+                continue
+            out[k] = cleaned
+        return out
+    if isinstance(v, list):
+        return [_deep_clean(x) for x in v if _deep_clean(x) is not None or isinstance(x, (dict, list))]
+    return v
+
+
 def _safe_returns(r) -> dict[str, float | None]:
     """Ensure every returns field is a finite float or None before going to Firestore."""
     return {
@@ -263,15 +309,32 @@ def confirm_ingest(
         log.info("confirm_ingest wrote %d contacts", len(contact_ids))
 
         financials = payload.get("financials") or {}
-        ttm = financials.get("ttm") or {"revenue": [], "expenses": []}
-        ttm["noi"] = compute_noi(ttm)
-        assumptions = default_assumptions(asset_class)
-        proforma = build_proforma_from_ttm(ttm, assumptions)
-        returns = compute_returns(building_doc, ttm, proforma, assumptions)
+        ttm_raw = financials.get("ttm") or {"revenue": [], "expenses": []}
+        log.info(
+            "confirm_ingest ttm shape rev=%d exp=%d",
+            len(ttm_raw.get("revenue") or []) if isinstance(ttm_raw, dict) else -1,
+            len(ttm_raw.get("expenses") or []) if isinstance(ttm_raw, dict) else -1,
+        )
+        ttm = _clean_statement(ttm_raw)
+        try:
+            ttm["noi"] = float(compute_noi(ttm))
+            if not math.isfinite(ttm["noi"]):
+                ttm["noi"] = 0.0
+        except Exception:
+            log.exception("compute_noi failed, defaulting to 0")
+            ttm["noi"] = 0.0
 
-        uw_ref = db.collection("underwriting").document()
-        uw_ref.set(
-            {
+        assumptions = default_assumptions(asset_class)
+
+        uw_id: str | None = None
+        try:
+            proforma_raw = build_proforma_from_ttm(ttm, assumptions)
+            proforma = _clean_statement(proforma_raw)
+            proforma["noi"] = float(compute_noi(proforma))
+            if not math.isfinite(proforma["noi"]):
+                proforma["noi"] = 0.0
+            returns = compute_returns(building_doc, ttm, proforma, assumptions)
+            uw_payload = _deep_clean({
                 "building_id": building_id,
                 "asset_class": asset_class,
                 "ttm": ttm,
@@ -280,9 +343,32 @@ def confirm_ingest(
                 "returns": _safe_returns(returns),
                 "version": 1,
                 "created_at": gcfs.SERVER_TIMESTAMP,
-            }
-        )
-        log.info("confirm_ingest wrote underwriting id=%s", uw_ref.id)
+            })
+            uw_ref = db.collection("underwriting").document()
+            uw_ref.set(uw_payload)
+            uw_id = uw_ref.id
+            log.info("confirm_ingest wrote underwriting id=%s", uw_id)
+        except Exception:
+            log.exception("confirm_ingest underwriting math/write failed; building+contacts kept")
+            # Write a minimal empty underwriting record so the UI has something to point at.
+            try:
+                uw_ref = db.collection("underwriting").document()
+                uw_ref.set(_deep_clean({
+                    "building_id": building_id,
+                    "asset_class": asset_class,
+                    "ttm": ttm,
+                    "proforma_12mo": {"revenue": [], "expenses": [], "noi": 0.0},
+                    "assumptions": assumptions,
+                    "returns": {"irr": None, "equity_multiple": None, "coc_yr1": None, "dscr": None},
+                    "version": 1,
+                    "created_at": gcfs.SERVER_TIMESTAMP,
+                    "note": "underwriting math failed at ingest; re-run from the building page",
+                }))
+                uw_id = uw_ref.id
+                log.info("confirm_ingest wrote placeholder underwriting id=%s", uw_id)
+            except Exception:
+                log.exception("placeholder underwriting write also failed")
+                uw_id = None
 
         ingest_ref.update(
             {
@@ -292,7 +378,7 @@ def confirm_ingest(
         )
         log.info("confirm_ingest done id=%s building=%s", ingestion_id, building_id)
 
-        return {"building_id": building_id, "contact_ids": contact_ids, "underwriting_id": uw_ref.id}
+        return {"building_id": building_id, "contact_ids": contact_ids, "underwriting_id": uw_id}
     except HTTPException:
         raise
     except Exception as exc:
