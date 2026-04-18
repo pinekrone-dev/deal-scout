@@ -4,6 +4,7 @@ import {
   addDoc,
   collection,
   doc,
+  getDoc,
   onSnapshot,
   orderBy,
   query,
@@ -12,7 +13,7 @@ import {
   updateDoc,
   where
 } from 'firebase/firestore';
-import { db } from '../lib/firebase';
+import { db, auth } from '../lib/firebase';
 import type { AssetClass, Building, Contact, Underwriting } from '../types';
 import { ASSET_CLASSES } from '../types';
 import UnderwritingPanel from '../components/UnderwritingPanel';
@@ -25,16 +26,49 @@ export default function BuildingDetailPage() {
   const { id } = useParams<{ id: string }>();
   const [tab, setTab] = useState<Tab>('overview');
   const [building, setBuilding] = useState<Building | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [missing, setMissing] = useState(false);
   const [underwriting, setUnderwriting] = useState<Underwriting | null>(null);
   const [uwLoading, setUwLoading] = useState(true);
   const [contacts, setContacts] = useState<(Contact & { id: string })[]>([]);
 
   useEffect(() => {
     if (!id) return;
-    const unsub = onSnapshot(doc(db, 'buildings', id), (snap) => {
-      if (snap.exists()) setBuilding({ id: snap.id, ...(snap.data() as Building) });
-    });
-    return () => unsub();
+    setMissing(false);
+    setLoadError(null);
+    let settled = false;
+    // One-shot fetch so we get a definitive answer fast and can show a real error.
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, 'buildings', id));
+        if (settled) return;
+        if (snap.exists()) {
+          setBuilding({ id: snap.id, ...(snap.data() as Building) });
+        } else {
+          setMissing(true);
+        }
+      } catch (e) {
+        if (!settled) setLoadError(e instanceof Error ? e.message : String(e));
+      }
+    })();
+    // Live listener keeps it in sync after the first fetch.
+    const unsub = onSnapshot(
+      doc(db, 'buildings', id),
+      (snap) => {
+        settled = true;
+        if (snap.exists()) {
+          setBuilding({ id: snap.id, ...(snap.data() as Building) });
+          setMissing(false);
+        } else {
+          setMissing(true);
+        }
+      },
+      (err) => {
+        settled = true;
+        setLoadError(err?.message ?? String(err));
+      }
+    );
+    return () => { settled = true; unsub(); };
   }, [id]);
 
   useEffect(() => {
@@ -44,15 +78,19 @@ export default function BuildingDetailPage() {
       where('building_id', '==', id),
       orderBy('version', 'desc')
     );
-    const unsub = onSnapshot(q, (snap) => {
-      if (!snap.empty) {
-        const d = snap.docs[0];
-        setUnderwriting({ id: d.id, ...(d.data() as Underwriting) });
-      } else {
-        setUnderwriting(null);
-      }
-      setUwLoading(false);
-    });
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        if (!snap.empty) {
+          const d = snap.docs[0];
+          setUnderwriting({ id: d.id, ...(d.data() as Underwriting) });
+        } else {
+          setUnderwriting(null);
+        }
+        setUwLoading(false);
+      },
+      () => { setUwLoading(false); }
+    );
     return () => unsub();
   }, [id]);
 
@@ -97,6 +135,27 @@ export default function BuildingDetailPage() {
     });
   }
 
+  if (loadError) {
+    return (
+      <div className="card p-6 space-y-2">
+        <div className="text-red-600 font-medium">Could not load building {id}.</div>
+        <div className="text-sm text-ink-700 whitespace-pre-wrap">{loadError}</div>
+        <div className="text-xs text-ink-500">Signed in as: {auth.currentUser?.email ?? 'anonymous'}</div>
+      </div>
+    );
+  }
+  if (missing) {
+    return (
+      <div className="card p-6 space-y-2">
+        <div className="text-amber-600 font-medium">Building {id} does not exist in Firestore.</div>
+        <div className="text-sm text-ink-500">
+          The save returned a building id but the doc was not found. This usually means the write hit a different project
+          or the create transaction was rolled back. <Link to="/buildings" className="text-accent-600 hover:underline">Back to Buildings</Link>.
+        </div>
+        <div className="text-xs text-ink-500">Signed in as: {auth.currentUser?.email ?? 'anonymous'}</div>
+      </div>
+    );
+  }
   if (!building) {
     return <div className="text-sm text-ink-500">Loading building...</div>;
   }
@@ -388,4 +447,3 @@ function ContactsTab({ contacts }: { contacts: (Contact & { id: string })[] }) {
     </div>
   );
 }
-
