@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import uuid
 from typing import Any
@@ -57,6 +58,58 @@ def root() -> dict[str, Any]:
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
     return {"status": "ok", "model": settings.gemini_model}
+
+
+# ---------- Helpers ----------
+
+
+def _num_or_none(v: Any) -> float | int | None:
+    """Coerce a value to a finite number or None. Accepts ints, floats, numeric strings.
+    Rejects NaN, Inf, empty strings, and anything uncoercible. Firestore does NOT accept
+    NaN/Inf in float fields: those writes will fail or hang depending on SDK version.
+    """
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return None  # bools coerce to 0/1 which we never want here
+    if isinstance(v, (int, float)):
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        return v
+    if isinstance(v, str):
+        s = v.strip().replace(",", "")
+        if not s:
+            return None
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        if not math.isfinite(f):
+            return None
+        return int(f) if f.is_integer() else f
+    return None
+
+
+def _clean_doc(d: dict[str, Any]) -> dict[str, Any]:
+    """Remove None/NaN/Inf values from a dict to keep Firestore docs tidy and safe."""
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        if v is None:
+            continue
+        if isinstance(v, float) and not math.isfinite(v):
+            continue
+        out[k] = v
+    return out
+
+
+def _safe_returns(r) -> dict[str, float | None]:
+    """Ensure every returns field is a finite float or None before going to Firestore."""
+    return {
+        "irr": _num_or_none(r.irr),
+        "equity_multiple": _num_or_none(r.equity_multiple),
+        "coc_yr1": _num_or_none(r.coc_yr1),
+        "dscr": _num_or_none(r.dscr),
+    }
 
 
 # ---------- Ingest ----------
@@ -137,58 +190,63 @@ def confirm_ingest(
     payload: dict[str, Any],
     user: dict = Depends(require_user),
 ) -> dict[str, Any]:
-    db = get_db()
-    ingest_ref = db.collection("om_ingestions").document(ingestion_id)
-    ingest_snap = ingest_ref.get()
-    if not ingest_snap.exists:
-        raise HTTPException(status_code=404, detail="Ingestion not found")
+    log.info("confirm_ingest start id=%s user=%s", ingestion_id, user.get("email"))
+    try:
+        db = get_db()
+        ingest_ref = db.collection("om_ingestions").document(ingestion_id)
+        ingest_snap = ingest_ref.get()
+        if not ingest_snap.exists:
+            raise HTTPException(status_code=404, detail="Ingestion not found")
 
-    building_in = payload.get("building") or {}
-    if not building_in.get("address"):
-        raise HTTPException(status_code=400, detail="Building address is required")
+        building_in = payload.get("building") or {}
+        address = (building_in.get("address") or "").strip()
+        if not address:
+            raise HTTPException(status_code=400, detail="Building address is required")
 
-    asset_class = building_in.get("asset_class") or "multifamily"
-    building_doc = {
-        "address": building_in.get("address"),
-        "city": building_in.get("city"),
-        "state": building_in.get("state"),
-        "zip": building_in.get("zip"),
-        "asset_class": asset_class,
-        "units": building_in.get("units"),
-        "sf": building_in.get("sf"),
-        "nrsf": building_in.get("nrsf"),
-        "keys": building_in.get("keys"),
-        "zoning": building_in.get("zoning"),
-        "entitlements": building_in.get("entitlements"),
-        "year_built": building_in.get("year_built"),
-        "year_renovated": building_in.get("year_renovated"),
-        "occupancy": building_in.get("occupancy"),
-        "current_noi": building_in.get("current_noi"),
-        "asking_price": building_in.get("asking_price"),
-        "cap_rate": building_in.get("cap_rate"),
-        "adr": building_in.get("adr"),
-        "revpar": building_in.get("revpar"),
-        "notes": building_in.get("notes"),
-        "photos": [],
-        "documents": [
-            f"gs://{settings.firebase_storage_bucket}/{p}"
-            for p in (ingest_snap.to_dict() or {}).get("storage_path", []) or []
-        ],
-        "created_at": gcfs.SERVER_TIMESTAMP,
-        "updated_at": gcfs.SERVER_TIMESTAMP,
-    }
-    building_ref = db.collection("buildings").document()
-    building_ref.set(building_doc)
-    building_id = building_ref.id
+        asset_class = building_in.get("asset_class") or "multifamily"
+        building_doc_raw = {
+            "address": address,
+            "city": building_in.get("city"),
+            "state": building_in.get("state"),
+            "zip": building_in.get("zip"),
+            "asset_class": asset_class,
+            "units": _num_or_none(building_in.get("units")),
+            "sf": _num_or_none(building_in.get("sf")),
+            "nrsf": _num_or_none(building_in.get("nrsf")),
+            "keys": _num_or_none(building_in.get("keys")),
+            "zoning": building_in.get("zoning"),
+            "entitlements": building_in.get("entitlements"),
+            "year_built": _num_or_none(building_in.get("year_built")),
+            "year_renovated": _num_or_none(building_in.get("year_renovated")),
+            "occupancy": _num_or_none(building_in.get("occupancy")),
+            "current_noi": _num_or_none(building_in.get("current_noi")),
+            "asking_price": _num_or_none(building_in.get("asking_price")),
+            "cap_rate": _num_or_none(building_in.get("cap_rate")),
+            "adr": _num_or_none(building_in.get("adr")),
+            "revpar": _num_or_none(building_in.get("revpar")),
+            "notes": building_in.get("notes"),
+            "photos": [],
+            "documents": [
+                f"gs://{settings.firebase_storage_bucket}/{p}"
+                for p in (ingest_snap.to_dict() or {}).get("storage_path", []) or []
+            ],
+            "created_at": gcfs.SERVER_TIMESTAMP,
+            "updated_at": gcfs.SERVER_TIMESTAMP,
+        }
+        building_doc = _clean_doc(building_doc_raw)
+        building_ref = db.collection("buildings").document()
+        log.info("confirm_ingest writing building id=%s fields=%d", building_ref.id, len(building_doc))
+        building_ref.set(building_doc)
+        building_id = building_ref.id
 
-    contact_ids: list[str] = []
-    for c in payload.get("contacts") or []:
-        if not c.get("name"):
-            continue
-        contact_ref = db.collection("contacts").document()
-        contact_ref.set(
-            {
-                "name": c.get("name"),
+        contact_ids: list[str] = []
+        for c in payload.get("contacts") or []:
+            name = (c.get("name") or "").strip()
+            if not name:
+                continue
+            contact_ref = db.collection("contacts").document()
+            contact_doc = _clean_doc({
+                "name": name,
                 "role": c.get("role") or "other",
                 "firm": c.get("firm"),
                 "email": c.get("email"),
@@ -199,44 +257,47 @@ def confirm_ingest(
                 "related_deals": [],
                 "created_at": gcfs.SERVER_TIMESTAMP,
                 "updated_at": gcfs.SERVER_TIMESTAMP,
+            })
+            contact_ref.set(contact_doc)
+            contact_ids.append(contact_ref.id)
+        log.info("confirm_ingest wrote %d contacts", len(contact_ids))
+
+        financials = payload.get("financials") or {}
+        ttm = financials.get("ttm") or {"revenue": [], "expenses": []}
+        ttm["noi"] = compute_noi(ttm)
+        assumptions = default_assumptions(asset_class)
+        proforma = build_proforma_from_ttm(ttm, assumptions)
+        returns = compute_returns(building_doc, ttm, proforma, assumptions)
+
+        uw_ref = db.collection("underwriting").document()
+        uw_ref.set(
+            {
+                "building_id": building_id,
+                "asset_class": asset_class,
+                "ttm": ttm,
+                "proforma_12mo": proforma,
+                "assumptions": assumptions,
+                "returns": _safe_returns(returns),
+                "version": 1,
+                "created_at": gcfs.SERVER_TIMESTAMP,
             }
         )
-        contact_ids.append(contact_ref.id)
+        log.info("confirm_ingest wrote underwriting id=%s", uw_ref.id)
 
-    financials = payload.get("financials") or {}
-    ttm = financials.get("ttm") or {"revenue": [], "expenses": []}
-    ttm["noi"] = compute_noi(ttm)
-    assumptions = default_assumptions(asset_class)
-    proforma = build_proforma_from_ttm(ttm, assumptions)
-    returns = compute_returns(building_doc, ttm, proforma, assumptions)
+        ingest_ref.update(
+            {
+                "building_id": building_id,
+                "confirmed_at": gcfs.SERVER_TIMESTAMP,
+            }
+        )
+        log.info("confirm_ingest done id=%s building=%s", ingestion_id, building_id)
 
-    uw_ref = db.collection("underwriting").document()
-    uw_ref.set(
-        {
-            "building_id": building_id,
-            "asset_class": asset_class,
-            "ttm": ttm,
-            "proforma_12mo": proforma,
-            "assumptions": assumptions,
-            "returns": {
-                "irr": returns.irr,
-                "equity_multiple": returns.equity_multiple,
-                "coc_yr1": returns.coc_yr1,
-                "dscr": returns.dscr,
-            },
-            "version": 1,
-            "created_at": gcfs.SERVER_TIMESTAMP,
-        }
-    )
-
-    ingest_ref.update(
-        {
-            "building_id": building_id,
-            "confirmed_at": gcfs.SERVER_TIMESTAMP,
-        }
-    )
-
-    return {"building_id": building_id, "contact_ids": contact_ids, "underwriting_id": uw_ref.id}
+        return {"building_id": building_id, "contact_ids": contact_ids, "underwriting_id": uw_ref.id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.exception("confirm_ingest failed id=%s", ingestion_id)
+        raise HTTPException(status_code=500, detail=f"confirm failed: {exc}") from exc
 
 
 # ---------- Underwriting calc ----------
@@ -263,12 +324,7 @@ def calc_underwriting(
         "ttm": ttm,
         "proforma_12mo": proforma,
         "assumptions": assumptions,
-        "returns": {
-            "irr": returns.irr,
-            "equity_multiple": returns.equity_multiple,
-            "coc_yr1": returns.coc_yr1,
-            "dscr": returns.dscr,
-        },
+        "returns": _safe_returns(returns),
     }
 
 

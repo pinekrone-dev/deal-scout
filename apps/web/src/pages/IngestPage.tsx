@@ -202,7 +202,10 @@ export default function IngestPage() {
           {saving ? 'Saving...' : 'Confirm and Create'}
         </button>
         <button className="btn" onClick={() => nav('/buildings')}>Cancel</button>
-        {error ? <div className="text-sm text-red-600">{error}</div> : null}
+        {!b.address && !saving ? (
+          <div className="text-sm text-amber-600">Address is required. Fill it in above to enable Confirm.</div>
+        ) : null}
+        {error ? <div className="text-sm text-red-600 whitespace-pre-wrap">{error}</div> : null}
       </div>
     </div>
   );
