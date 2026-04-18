@@ -96,7 +96,7 @@ export default function IngestPage() {
     return (
       <div className="card p-6">
         <div className="text-ink-700 font-medium">Extracting OM...</div>
-        <div className="text-sm text-ink-500">Running Claude vision extraction. This takes 10-60 seconds per document.</div>
+        <div className="text-sm text-ink-500">Running Gemini vision extraction. This takes 10-60 seconds per document.</div>
         <div className="mt-4 h-2 bg-ink-200 rounded overflow-hidden">
           <div className="h-2 bg-accent-500 animate-pulse w-1/3" />
         </div>

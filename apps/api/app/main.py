@@ -1,4 +1,4 @@
-"""Deal Scout CRM backend. FastAPI + Firestore + Claude vision OM ingestion."""
+"""Deal Scout CRM backend. FastAPI + Firestore + Gemini vision OM ingestion."""
 from __future__ import annotations
 
 import asyncio
