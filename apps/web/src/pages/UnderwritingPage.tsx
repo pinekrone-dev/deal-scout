@@ -70,7 +70,7 @@ function hydrate(b: BRow, data: Partial<Underwriting> & { id?: string }): Underw
 
 export default function UnderwritingPage() {
   const { user } = useAuth();
-  const { currentOwnerUid, current } = useWorkspace();
+  const { currentOwnerUid, current, can } = useWorkspace();
   const nav = useNavigate();
   const params = useParams();
 
@@ -159,6 +159,10 @@ export default function UnderwritingPage() {
 
   async function save(next: Underwriting) {
     if (!selected || !currentOwnerUid) return;
+    if (!can('underwrite')) {
+      alert("You don't have permission to update underwriting in this workspace.");
+      return;
+    }
     const payload = {
       ...next,
       building_id: selected.id,

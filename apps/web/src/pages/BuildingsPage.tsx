@@ -13,7 +13,7 @@ type Row = Building & { id: string };
 
 export default function BuildingsPage() {
   const { user } = useAuth();
-  const { currentOwnerUid, current } = useWorkspace();
+  const { currentOwnerUid, current, can } = useWorkspace();
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState('');
   const [assetFilter, setAssetFilter] = useState<AssetClass | ''>('');
@@ -188,14 +188,18 @@ export default function BuildingsPage() {
             className="hidden"
             onChange={(e) => handleFiles(e.target.files)}
           />
-          <button
-            className="btn"
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading}
-          >
-            {uploading ? 'Uploading...' : 'Upload OM'}
-          </button>
-          <button className="btn-primary" onClick={createBlank}>New Building</button>
+          {can('create') ? (
+            <>
+              <button
+                className="btn"
+                onClick={() => fileRef.current?.click()}
+                disabled={uploading}
+              >
+                {uploading ? 'Uploading...' : 'Upload OM'}
+              </button>
+              <button className="btn-primary" onClick={createBlank}>New Building</button>
+            </>
+          ) : null}
         </div>
       </div>
 
@@ -217,7 +221,7 @@ export default function BuildingsPage() {
           ))}
         </select>
         <div className="flex-1" />
-        {selCount > 0 ? (
+        {selCount > 0 && can('delete') ? (
           <button
             className="btn text-red-700 border-red-300 hover:bg-red-50"
             disabled={bulkBusy}

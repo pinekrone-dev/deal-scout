@@ -1,7 +1,17 @@
 rules_version = '2';
 
-// Deal Scout CRM. Multi-tenant: every doc has owner_uid = creating user's uid.
-// Any authenticated Firebase user can sign in. Users can only read/write docs they own.
+// Deal Scout CRM.
+//
+// Data model: every business doc has `owner_uid` = the workspace owner's uid.
+// A workspace is identified by its owner's uid. A user's personal profile at
+// /users/{uid} stores `workspace_owner_uid` pointing at which workspace they
+// currently belong to (defaults to their own uid).
+//
+// To let another user collaborate, the owner creates a membership document at
+// /workspace_members/{owner_uid}_{member_uid}. The doc has a `permissions`
+// map with booleans: view / create / edit / delete / underwrite / invite_others.
+// The owner always has all permissions implicitly. Rules enforce per-action
+// permissions for members.
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -9,52 +19,131 @@ service cloud.firestore {
       return request.auth != null && request.auth.uid != null;
     }
 
-    function isOwner(data) {
-      return signedIn() && data.owner_uid == request.auth.uid;
+    function isOwner(ownerUid) {
+      return signedIn() && request.auth.uid == ownerUid;
     }
 
-    function willOwn() {
-      return signedIn() && request.resource.data.owner_uid == request.auth.uid;
+    function membershipPath(ownerUid) {
+      return /databases/$(database)/documents/workspace_members/$(ownerUid + '_' + request.auth.uid);
     }
 
-    // Per-user profile. Stores personal settings such as the user's Gemini API key.
+    function isMember(ownerUid) {
+      return signedIn() && exists(membershipPath(ownerUid));
+    }
+
+    function memberPerms(ownerUid) {
+      return get(membershipPath(ownerUid)).data.permissions;
+    }
+
+    function memberHas(ownerUid, action) {
+      return isMember(ownerUid)
+        && memberPerms(ownerUid) != null
+        && memberPerms(ownerUid).get(action, false) == true;
+    }
+
+    // Any listed member can read; owner always can.
+    function canRead(data) {
+      return signedIn()
+        && 'owner_uid' in data
+        && (isOwner(data.owner_uid) || isMember(data.owner_uid));
+    }
+
+    // Per-action write gates. Owner is implicitly allowed.
+    function canCreate(newOwnerUid) {
+      return isOwner(newOwnerUid) || memberHas(newOwnerUid, 'create');
+    }
+
+    function canEdit(existingOwnerUid) {
+      return isOwner(existingOwnerUid) || memberHas(existingOwnerUid, 'edit');
+    }
+
+    function canDelete(existingOwnerUid) {
+      return isOwner(existingOwnerUid) || memberHas(existingOwnerUid, 'delete');
+    }
+
+    function canUnderwrite(existingOwnerUid) {
+      return isOwner(existingOwnerUid) || memberHas(existingOwnerUid, 'underwrite');
+    }
+
+    // Per-user profile. Private to the user.
     match /users/{uid} {
       allow read, write: if signedIn() && request.auth.uid == uid;
     }
 
+    // Membership records. docId = {ownerUid}_{memberUid}.
+    //   - Any signed-in user can read their own membership row.
+    //   - The owner can create/update/delete memberships for their workspace.
+    //   - A member can delete their own membership (leave the workspace).
+    match /workspace_members/{mid} {
+      allow read: if signedIn()
+        && (resource.data.member_uid == request.auth.uid
+            || resource.data.owner_uid == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.owner_uid == request.auth.uid
+        && request.resource.data.member_uid is string;
+      allow update: if signedIn()
+        && resource.data.owner_uid == request.auth.uid;
+      allow delete: if signedIn()
+        && (resource.data.owner_uid == request.auth.uid
+            || resource.data.member_uid == request.auth.uid);
+    }
+
+    // Invite tokens. The owner creates an invite for an email. Any signed-in
+    // user can read a specific invite doc by its token to accept. Only the
+    // owner or the invited email can delete.
+    match /invites/{token} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.owner_uid == request.auth.uid;
+      allow update: if signedIn()
+        && (resource.data.owner_uid == request.auth.uid
+            || resource.data.email == request.auth.token.email);
+      allow delete: if signedIn()
+        && (resource.data.owner_uid == request.auth.uid
+            || resource.data.email == request.auth.token.email);
+    }
+
     match /buildings/{id} {
-      allow read: if isOwner(resource.data);
-      allow create: if willOwn();
-      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
-      allow delete: if isOwner(resource.data);
+      allow read: if canRead(resource.data);
+      allow create: if canCreate(request.resource.data.owner_uid);
+      allow update: if canEdit(resource.data.owner_uid)
+        && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if canDelete(resource.data.owner_uid);
     }
 
     match /contacts/{id} {
-      allow read: if isOwner(resource.data);
-      allow create: if willOwn();
-      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
-      allow delete: if isOwner(resource.data);
+      allow read: if canRead(resource.data);
+      allow create: if canCreate(request.resource.data.owner_uid);
+      allow update: if canEdit(resource.data.owner_uid)
+        && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if canDelete(resource.data.owner_uid);
     }
 
     match /deals/{id} {
-      allow read: if isOwner(resource.data);
-      allow create: if willOwn();
-      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
-      allow delete: if isOwner(resource.data);
+      allow read: if canRead(resource.data);
+      allow create: if canCreate(request.resource.data.owner_uid);
+      allow update: if canEdit(resource.data.owner_uid)
+        && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if canDelete(resource.data.owner_uid);
     }
 
+    // Underwriting uses its own permission flag so you can have e.g. a
+    // leasing-focused editor who can modify buildings/contacts but not
+    // touch the financial model (or vice versa).
     match /underwriting/{id} {
-      allow read: if isOwner(resource.data);
-      allow create: if willOwn();
-      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
-      allow delete: if isOwner(resource.data);
+      allow read: if canRead(resource.data);
+      allow create: if canUnderwrite(request.resource.data.owner_uid);
+      allow update: if canUnderwrite(resource.data.owner_uid)
+        && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if canDelete(resource.data.owner_uid);
     }
 
     match /om_ingestions/{id} {
-      allow read: if isOwner(resource.data);
-      allow create: if willOwn();
-      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
-      allow delete: if isOwner(resource.data);
+      allow read: if canRead(resource.data);
+      allow create: if canCreate(request.resource.data.owner_uid);
+      allow update: if canEdit(resource.data.owner_uid)
+        && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if canDelete(resource.data.owner_uid);
     }
   }
 }

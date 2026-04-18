@@ -11,7 +11,7 @@ type Row = Contact & { id: string };
 
 export default function ContactsPage() {
   const { user } = useAuth();
-  const { currentOwnerUid, current } = useWorkspace();
+  const { currentOwnerUid, current, can } = useWorkspace();
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState('');
   const [selected, setSelected] = useState<Record<string, boolean>>({});
@@ -152,7 +152,9 @@ export default function ContactsPage() {
             ) : null}
           </p>
         </div>
-        <button className="btn-primary" onClick={createBlank}>New Contact</button>
+        {can('create') ? (
+          <button className="btn-primary" onClick={createBlank}>New Contact</button>
+        ) : null}
       </div>
 
       <div className="card p-3 flex flex-wrap items-center gap-3">
@@ -163,7 +165,7 @@ export default function ContactsPage() {
           onChange={(e) => setFilter(e.target.value)}
         />
         <div className="flex-1" />
-        {selCount > 0 ? (
+        {selCount > 0 && can('delete') ? (
           <button
             className="btn text-red-700 border-red-300 hover:bg-red-50"
             disabled={bulkBusy}

@@ -10,11 +10,25 @@ import {
 import { useAuth } from './auth';
 import { apiJson } from './api';
 
+export type Permissions = {
+  view: boolean;
+  create: boolean;
+  edit: boolean;
+  delete: boolean;
+  underwrite: boolean;
+  invite_others: boolean;
+};
+
+export const ALL_PERMS: Permissions = {
+  view: true, create: true, edit: true, delete: true, underwrite: true, invite_others: true,
+};
+
 export type Workspace = {
   owner_uid: string;
   owner_email: string;
   role: 'owner' | 'editor';
   label: string;
+  permissions?: Permissions;
 };
 
 type ListResp = { workspaces: Workspace[]; default_owner_uid: string };
@@ -26,6 +40,8 @@ type Ctx = {
   current: Workspace | null;
   currentOwnerUid: string | null;
   isOwner: boolean;
+  permissions: Permissions;
+  can: (action: keyof Permissions) => boolean;
   select: (ownerUid: string) => void;
   refresh: () => Promise<void>;
 };
@@ -87,6 +103,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<Ctx>(() => {
     const current = workspaces.find((w) => w.owner_uid === selectedUid) ?? workspaces[0] ?? null;
+    const permissions: Permissions = current?.role === 'owner'
+      ? ALL_PERMS
+      : (current?.permissions ?? { view: false, create: false, edit: false, delete: false, underwrite: false, invite_others: false });
     return {
       loading,
       error,
@@ -94,6 +113,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       current,
       currentOwnerUid: current?.owner_uid ?? null,
       isOwner: current?.role === 'owner',
+      permissions,
+      can: (action) => !!permissions[action],
       select,
       refresh
     };

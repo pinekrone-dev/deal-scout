@@ -169,7 +169,8 @@ def _effective_workspace(uid: str) -> str:
 
 
 def _can_access(uid: str, owner_uid: str) -> bool:
-    """True if uid can read/write docs owned by owner_uid."""
+    """True if uid can read docs owned by owner_uid. View is always granted
+    to any listed member; per-action permissions are enforced separately."""
     if uid == owner_uid:
         return True
     try:
@@ -183,6 +184,67 @@ def _can_access(uid: str, owner_uid: str) -> bool:
     except Exception:
         log.exception("can_access check failed owner=%s member=%s", owner_uid, uid)
         return False
+
+
+# Default permission sets. Admin always has everything implicitly.
+DEFAULT_PERMISSIONS = {
+    "view": True,
+    "create": True,
+    "edit": True,
+    "delete": False,
+    "underwrite": True,
+    "invite_others": False,
+}
+
+PERMISSION_PRESETS: dict[str, dict[str, bool]] = {
+    "viewer":   {"view": True,  "create": False, "edit": False, "delete": False, "underwrite": False, "invite_others": False},
+    "analyst":  {"view": True,  "create": False, "edit": False, "delete": False, "underwrite": True,  "invite_others": False},
+    "editor":   {"view": True,  "create": True,  "edit": True,  "delete": False, "underwrite": True,  "invite_others": False},
+    "manager":  {"view": True,  "create": True,  "edit": True,  "delete": True,  "underwrite": True,  "invite_others": False},
+    "admin":    {"view": True,  "create": True,  "edit": True,  "delete": True,  "underwrite": True,  "invite_others": True},
+}
+
+
+def _normalize_permissions(raw: Any) -> dict[str, bool]:
+    """Coerce an arbitrary permissions dict into a well-formed bool map."""
+    out = dict(DEFAULT_PERMISSIONS)
+    if isinstance(raw, dict):
+        for k in list(out.keys()):
+            if k in raw:
+                out[k] = bool(raw[k])
+    return out
+
+
+def _permissions_for(uid: str, owner_uid: str) -> dict[str, bool]:
+    """Return the effective permission map for uid acting on owner_uid's data.
+    Owner always gets everything. Members read their membership doc. Unknown
+    users get an all-false map."""
+    if uid == owner_uid:
+        return {k: True for k in DEFAULT_PERMISSIONS.keys()}
+    try:
+        snap = (
+            get_db()
+            .collection("workspace_members")
+            .document(f"{owner_uid}_{uid}")
+            .get()
+        )
+        if not snap.exists:
+            return {k: False for k in DEFAULT_PERMISSIONS.keys()}
+        data = snap.to_dict() or {}
+        return _normalize_permissions(data.get("permissions"))
+    except Exception:
+        log.exception("permissions_for failed owner=%s member=%s", owner_uid, uid)
+        return {k: False for k in DEFAULT_PERMISSIONS.keys()}
+
+
+def _require_permission(uid: str, owner_uid: str, action: str) -> None:
+    """Raise 403 unless uid has the named permission on owner_uid's workspace."""
+    perms = _permissions_for(uid, owner_uid)
+    if not perms.get(action):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing permission '{action}' for this workspace",
+        )
 
 
 # ---------- Settings ----------
@@ -686,6 +748,7 @@ def list_my_workspaces(user: dict = Depends(require_user)) -> dict[str, Any]:
         "owner_email": (own_data or {}).get("email") or email,
         "role": "owner",
         "label": "My deals",
+        "permissions": {k: True for k in DEFAULT_PERMISSIONS.keys()},
     })
     # Memberships
     try:
@@ -706,6 +769,7 @@ def list_my_workspaces(user: dict = Depends(require_user)) -> dict[str, Any]:
                 "owner_email": owner_email or "",
                 "role": data.get("role") or "editor",
                 "label": f"Shared with you: {owner_email}" if owner_email else "Shared deals",
+                "permissions": _normalize_permissions(data.get("permissions")),
             })
     except Exception:
         log.exception("list_my_workspaces memberships read failed uid=%s", uid)
@@ -738,6 +802,7 @@ def list_members(user: dict = Depends(require_user)) -> dict[str, Any]:
             "uid": data.get("member_uid"),
             "email": data.get("email") or "",
             "role": data.get("role") or "editor",
+            "permissions": _normalize_permissions(data.get("permissions")),
             "invited_at": data.get("created_at"),
         })
     # Pending invites
@@ -752,9 +817,10 @@ def list_members(user: dict = Depends(require_user)) -> dict[str, Any]:
         invites.append({
             "token": iv.id,
             "email": d.get("email"),
+            "permissions": _normalize_permissions(d.get("permissions")),
             "created_at": d.get("created_at"),
         })
-    return {"members": rows, "invites": invites}
+    return {"members": rows, "invites": invites, "presets": PERMISSION_PRESETS}
 
 
 @app.post("/api/workspace/invites")
@@ -769,6 +835,14 @@ def create_invite(
     if not origin:
         raise HTTPException(status_code=400, detail="origin required to build accept link")
 
+    # Permissions: prefer explicit map; otherwise derive from preset; otherwise editor.
+    raw_perms = payload.get("permissions")
+    if isinstance(raw_perms, dict):
+        permissions = _normalize_permissions(raw_perms)
+    else:
+        preset = (payload.get("preset") or "editor").lower()
+        permissions = dict(PERMISSION_PRESETS.get(preset, PERMISSION_PRESETS["editor"]))
+
     db = get_db()
     uid = user["uid"]
     token = secrets.token_urlsafe(24)
@@ -778,6 +852,7 @@ def create_invite(
         "owner_uid": uid,
         "inviter_email": user.get("email") or "",
         "role": "editor",
+        "permissions": permissions,
         "accepted": False,
         "created_at": gcfs.SERVER_TIMESTAMP,
     }
@@ -798,6 +873,7 @@ def create_invite(
                 "member_uid": member_uid,
                 "email": email,
                 "role": "editor",
+                "permissions": permissions,
                 "created_at": gcfs.SERVER_TIMESTAMP,
             }, merge=True)
             db.collection("invites").document(token).update({
@@ -855,6 +931,7 @@ def reprovision_invite(token: str, user: dict = Depends(require_user)) -> dict[s
             "member_uid": member_uid,
             "email": email,
             "role": data.get("role") or "editor",
+            "permissions": _normalize_permissions(data.get("permissions")),
             "created_at": gcfs.SERVER_TIMESTAMP,
         }, merge=True)
         ref.update({
@@ -902,6 +979,7 @@ def accept_invite(token: str, user: dict = Depends(require_user)) -> dict[str, A
         "member_uid": member_uid,
         "email": user.get("email") or invitee_email,
         "role": data.get("role") or "editor",
+        "permissions": _normalize_permissions(data.get("permissions")),
         "created_at": gcfs.SERVER_TIMESTAMP,
     })
 
@@ -914,6 +992,32 @@ def accept_invite(token: str, user: dict = Depends(require_user)) -> dict[str, A
 
     ref.update({"accepted": True, "accepted_at": gcfs.SERVER_TIMESTAMP, "accepted_by_uid": member_uid})
     return {"ok": True, "workspace_owner_uid": owner_uid}
+
+
+@app.patch("/api/workspace/members/{member_uid}")
+def update_member_permissions(
+    member_uid: str,
+    payload: dict[str, Any],
+    user: dict = Depends(require_user),
+) -> dict[str, Any]:
+    """Owner updates a member's permissions. Body: {permissions: {...}} OR {preset: 'editor'}."""
+    db = get_db()
+    owner_uid = user["uid"]
+    ref = db.collection("workspace_members").document(f"{owner_uid}_{member_uid}")
+    snap = ref.get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="Member not found")
+
+    if isinstance(payload.get("permissions"), dict):
+        new_perms = _normalize_permissions(payload["permissions"])
+    elif payload.get("preset"):
+        preset = payload["preset"].lower()
+        new_perms = dict(PERMISSION_PRESETS.get(preset, PERMISSION_PRESETS["editor"]))
+    else:
+        raise HTTPException(status_code=400, detail="Provide 'permissions' or 'preset'")
+
+    ref.update({"permissions": new_perms, "updated_at": gcfs.SERVER_TIMESTAMP})
+    return {"ok": True, "permissions": new_perms}
 
 
 @app.delete("/api/workspace/members/{member_uid}")
@@ -979,6 +1083,8 @@ def delete_building(building_id: str, user: dict = Depends(require_user)) -> dic
     owner = (snap.to_dict() or {}).get("owner_uid")
     if owner and not _can_access(user["uid"], owner):
         raise HTTPException(status_code=404, detail="Building not found")
+    if owner:
+        _require_permission(user["uid"], owner, "delete")
 
     removed: dict[str, int] = {"underwriting": 0, "deals": 0, "om_ingestions": 0, "contact_links": 0}
 
@@ -1029,6 +1135,8 @@ def delete_contact(contact_id: str, user: dict = Depends(require_user)) -> dict[
     owner = (snap.to_dict() or {}).get("owner_uid")
     if owner and not _can_access(user["uid"], owner):
         raise HTTPException(status_code=404, detail="Contact not found")
+    if owner:
+        _require_permission(user["uid"], owner, "delete")
 
     removed = {"deal_links": 0}
     for d in db.collection("deals").where(
@@ -1085,6 +1193,9 @@ def bulk_delete_buildings(
             owner = (snap.to_dict() or {}).get("owner_uid")
             if owner and not _can_access(user["uid"], owner):
                 errors.append({"id": bid, "error": "not_authorized"})
+                continue
+            if owner and not _permissions_for(user["uid"], owner).get("delete"):
+                errors.append({"id": bid, "error": "missing_delete_permission"})
                 continue
             # Cascade children. Swallow per-child errors so one bad doc doesn't
             # kill the whole operation; we still want to delete the building.
@@ -1149,6 +1260,9 @@ def bulk_delete_contacts(
             owner = (snap.to_dict() or {}).get("owner_uid")
             if owner and not _can_access(user["uid"], owner):
                 errors.append({"id": cid, "error": "not_authorized"})
+                continue
+            if owner and not _permissions_for(user["uid"], owner).get("delete"):
+                errors.append({"id": cid, "error": "missing_delete_permission"})
                 continue
             try:
                 for d in db.collection("deals").where(

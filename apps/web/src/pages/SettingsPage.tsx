@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { apiFetch, apiJson } from '../lib/api';
 import { useAuth } from '../lib/auth';
-import { useWorkspace } from '../lib/workspace';
+import { useWorkspace, type Permissions } from '../lib/workspace';
 
 type SettingsStatus = {
   email: string;
@@ -13,10 +13,31 @@ type SettingsStatus = {
   is_workspace_owner: boolean;
 };
 
-type Member = { uid: string; email: string; role: string; invited_at: unknown };
-type Invite = { token: string; email: string; created_at: unknown };
-type MembersResp = { members: Member[]; invites: Invite[] };
-type CreateInviteResp = { token: string; accept_url: string; emailed: boolean };
+type Member = { uid: string; email: string; role: string; permissions: Permissions; invited_at: unknown };
+type Invite = { token: string; email: string; permissions: Permissions; created_at: unknown };
+type MembersResp = { members: Member[]; invites: Invite[]; presets: Record<string, Permissions> };
+type CreateInviteResp = { token: string; accept_url: string; emailed: boolean; auto_provisioned?: boolean };
+
+const PERM_LABELS: { key: keyof Permissions; label: string; hint: string }[] = [
+  { key: 'view',          label: 'View',             hint: 'See buildings, contacts, underwriting.' },
+  { key: 'create',        label: 'Add records',      hint: 'Create buildings and contacts.' },
+  { key: 'edit',          label: 'Edit records',     hint: 'Modify building and contact fields.' },
+  { key: 'delete',        label: 'Delete records',   hint: 'Remove buildings and contacts (with cascade).' },
+  { key: 'underwrite',    label: 'Run underwriting', hint: 'Create and modify underwriting models.' },
+  { key: 'invite_others', label: 'Invite others',    hint: 'Add other users to the workspace.' },
+];
+
+const DEFAULT_INVITE_PERMS: Permissions = {
+  view: true, create: true, edit: true, delete: false, underwrite: true, invite_others: false,
+};
+
+const PRESETS: { id: string; label: string; perms: Permissions }[] = [
+  { id: 'viewer',   label: 'Viewer',   perms: { view: true, create: false, edit: false, delete: false, underwrite: false, invite_others: false } },
+  { id: 'analyst',  label: 'Analyst',  perms: { view: true, create: false, edit: false, delete: false, underwrite: true,  invite_others: false } },
+  { id: 'editor',   label: 'Editor',   perms: DEFAULT_INVITE_PERMS },
+  { id: 'manager',  label: 'Manager',  perms: { view: true, create: true,  edit: true,  delete: true,  underwrite: true,  invite_others: false } },
+  { id: 'admin',    label: 'Admin',    perms: { view: true, create: true,  edit: true,  delete: true,  underwrite: true,  invite_others: true  } },
+];
 
 export default function SettingsPage() {
   const { user } = useAuth();
@@ -32,9 +53,12 @@ export default function SettingsPage() {
   const [members, setMembers] = useState<Member[]>([]);
   const [invites, setInvites] = useState<Invite[]>([]);
   const [inviteEmail, setInviteEmail] = useState('');
+  const [invitePerms, setInvitePerms] = useState<Permissions>(DEFAULT_INVITE_PERMS);
   const [invitingLoad, setInvitingLoad] = useState(false);
   const [justCreatedInvite, setJustCreatedInvite] = useState<CreateInviteResp | null>(null);
   const [diagnose, setDiagnose] = useState<unknown>(null);
+  const [editingMember, setEditingMember] = useState<string | null>(null);
+  const [editPerms, setEditPerms] = useState<Permissions>(DEFAULT_INVITE_PERMS);
 
   async function reload() {
     try {
@@ -132,7 +156,7 @@ export default function SettingsPage() {
       const origin = window.location.origin;
       const resp = await apiJson<CreateInviteResp>('/api/workspace/invites', {
         method: 'POST',
-        body: JSON.stringify({ email, origin })
+        body: JSON.stringify({ email, origin, permissions: invitePerms })
       });
       setJustCreatedInvite(resp);
       setInviteEmail('');
@@ -142,6 +166,26 @@ export default function SettingsPage() {
     } finally {
       setInvitingLoad(false);
     }
+  }
+
+  async function savePermissions(uid: string) {
+    setError(null);
+    try {
+      await apiJson(`/api/workspace/members/${uid}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ permissions: editPerms }),
+      });
+      setMessage('Permissions updated.');
+      setEditingMember(null);
+      await reloadMembers();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  function applyPreset(target: 'invite' | 'edit', preset: Permissions) {
+    if (target === 'invite') setInvitePerms(preset);
+    else setEditPerms(preset);
   }
 
   async function removeMember(uid: string) {
@@ -282,57 +326,101 @@ export default function SettingsPage() {
         <div>
           <h2 className="font-semibold">Workspace members</h2>
           <p className="text-sm text-ink-500">
-            Invite an editor by email. They'll be able to view and edit everything in your workspace.
+            Add users by email and control exactly what they can do in your workspace.
           </p>
         </div>
 
-        <div className="space-y-2">
-          {members.map((m) => (
-            <div key={m.uid} className="flex items-center justify-between py-2 border-b border-ink-100 last:border-0">
-              <div>
-                <div className="text-sm font-medium">{m.email || m.uid}</div>
-                <div className="text-xs text-ink-500 capitalize">{m.role}</div>
+        {/* Member list */}
+        <div className="space-y-3">
+          {members.map((m) => {
+            const isEditing = editingMember === m.uid;
+            const enabledList = m.permissions
+              ? PERM_LABELS.filter((p) => m.permissions[p.key]).map((p) => p.label)
+              : [];
+            return (
+              <div key={m.uid} className="border border-ink-100 rounded p-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-sm font-medium">{m.email || m.uid}</div>
+                    <div className="text-xs text-ink-500 capitalize">{m.role}</div>
+                  </div>
+                  {m.role === 'owner' ? (
+                    <span className="pill">you</span>
+                  ) : isEditing ? (
+                    <div className="flex gap-2">
+                      <button className="btn-primary text-xs" onClick={() => savePermissions(m.uid)}>Save</button>
+                      <button className="btn-ghost text-xs" onClick={() => setEditingMember(null)}>Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="flex gap-2">
+                      <button
+                        className="btn text-xs"
+                        onClick={() => {
+                          setEditingMember(m.uid);
+                          setEditPerms({ ...DEFAULT_INVITE_PERMS, ...m.permissions });
+                        }}
+                      >
+                        Edit permissions
+                      </button>
+                      <button className="btn-ghost text-xs text-red-600" onClick={() => removeMember(m.uid)}>
+                        Remove
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {m.role !== 'owner' && !isEditing ? (
+                  <div className="mt-2 text-xs text-ink-600">
+                    Can: {enabledList.length ? enabledList.join(', ') : <span className="text-ink-400">view only</span>}
+                  </div>
+                ) : null}
+
+                {isEditing ? (
+                  <PermissionsEditor
+                    value={editPerms}
+                    onChange={setEditPerms}
+                    onPreset={(p) => applyPreset('edit', p)}
+                  />
+                ) : null}
               </div>
-              {m.role !== 'owner' ? (
-                <button className="btn-ghost text-xs text-red-600" onClick={() => removeMember(m.uid)}>
-                  Remove
-                </button>
-              ) : (
-                <span className="pill">you</span>
-              )}
-            </div>
-          ))}
+            );
+          })}
         </div>
 
         {invites.length > 0 ? (
-          <div>
+          <div className="pt-2">
             <div className="label">Pending invites</div>
             <div className="space-y-2">
               {invites.map((iv) => (
-                <div key={iv.token} className="flex items-center justify-between py-2 border-b border-ink-100 last:border-0">
-                  <div>
-                    <div className="text-sm">{iv.email}</div>
-                    <div className="text-xs text-ink-500 break-all">
-                      {window.location.origin}/invite/{iv.token}
+                <div key={iv.token} className="border border-ink-100 rounded p-3 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-sm">{iv.email}</div>
+                      <div className="text-xs text-ink-500 break-all">
+                        {window.location.origin}/invite/{iv.token}
+                      </div>
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        className="btn text-xs"
+                        onClick={() => copy(`${window.location.origin}/invite/${iv.token}`)}
+                      >
+                        Copy link
+                      </button>
+                      <button
+                        className="btn text-xs"
+                        onClick={() => reprovisionInvite(iv.token)}
+                        title="If they've signed up already, this grants access without needing them to click the link."
+                      >
+                        Reprovision
+                      </button>
+                      <button className="btn-ghost text-xs text-red-600" onClick={() => revokeInvite(iv.token)}>
+                        Revoke
+                      </button>
                     </div>
                   </div>
-                  <div className="flex gap-2">
-                    <button
-                      className="btn text-xs"
-                      onClick={() => copy(`${window.location.origin}/invite/${iv.token}`)}
-                    >
-                      Copy link
-                    </button>
-                    <button
-                      className="btn text-xs"
-                      onClick={() => reprovisionInvite(iv.token)}
-                      title="If they've signed up already, this grants access without needing them to click the link."
-                    >
-                      Reprovision
-                    </button>
-                    <button className="btn-ghost text-xs text-red-600" onClick={() => revokeInvite(iv.token)}>
-                      Revoke
-                    </button>
+                  <div className="text-xs text-ink-600">
+                    Will be granted: {PERM_LABELS.filter((p) => iv.permissions?.[p.key]).map((p) => p.label).join(', ') || 'view only'}
                   </div>
                 </div>
               ))}
@@ -340,25 +428,42 @@ export default function SettingsPage() {
           </div>
         ) : null}
 
-        <div className="flex items-center gap-2 pt-2">
-          <input
-            className="field flex-1"
-            placeholder="person@example.com"
-            value={inviteEmail}
-            onChange={(e) => setInviteEmail(e.target.value)}
-            type="email"
+        {/* New invite form */}
+        <div className="border-t border-ink-200 pt-4 space-y-3">
+          <div className="label">Add a new user</div>
+          <div className="flex items-center gap-2">
+            <input
+              className="field flex-1"
+              placeholder="person@example.com"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              type="email"
+            />
+            <button className="btn-primary" onClick={sendInvite} disabled={invitingLoad || !inviteEmail}>
+              {invitingLoad ? 'Adding...' : 'Add user'}
+            </button>
+          </div>
+          <PermissionsEditor
+            value={invitePerms}
+            onChange={setInvitePerms}
+            onPreset={(p) => applyPreset('invite', p)}
           />
-          <button className="btn-primary" onClick={sendInvite} disabled={invitingLoad || !inviteEmail}>
-            {invitingLoad ? 'Creating...' : 'Invite'}
-          </button>
+          <p className="text-xs text-ink-500">
+            If the email already has a Deal Scout account, access is granted immediately. Otherwise they'll
+            get an invite link that grants access when they sign up.
+          </p>
         </div>
 
         {justCreatedInvite ? (
           <div className="rounded border border-green-300 bg-green-50 p-3 text-sm space-y-2">
-            <div className="font-medium text-green-800">Invite created</div>
+            <div className="font-medium text-green-800">
+              {justCreatedInvite.auto_provisioned
+                ? 'User added with access granted.'
+                : 'Invite created.'}
+            </div>
             {justCreatedInvite.emailed ? (
               <div className="text-green-700">Email sent.</div>
-            ) : (
+            ) : !justCreatedInvite.auto_provisioned ? (
               <div className="text-green-800">
                 Share this link with them:
                 <div className="mt-1 break-all text-ink-700 bg-white border border-ink-200 rounded px-2 py-1">
@@ -371,7 +476,7 @@ export default function SettingsPage() {
                   Copy link
                 </button>
               </div>
-            )}
+            ) : null}
           </div>
         ) : null}
 
@@ -428,6 +533,50 @@ export default function SettingsPage() {
       {error ? (
         <div className="card p-4 text-sm text-red-600 whitespace-pre-wrap">{error}</div>
       ) : null}
+    </div>
+  );
+}
+
+function PermissionsEditor({
+  value,
+  onChange,
+  onPreset,
+}: {
+  value: Permissions;
+  onChange: (p: Permissions) => void;
+  onPreset: (p: Permissions) => void;
+}) {
+  return (
+    <div className="rounded border border-ink-200 bg-ink-50 p-3 space-y-3">
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-xs text-ink-500 mr-2">Quick set:</span>
+        {PRESETS.map((p) => (
+          <button
+            key={p.id}
+            className="btn-ghost text-xs px-2 py-1 border border-ink-200 rounded"
+            onClick={() => onPreset(p.perms)}
+            type="button"
+          >
+            {p.label}
+          </button>
+        ))}
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {PERM_LABELS.map((p) => (
+          <label key={p.key} className="flex items-start gap-2 text-sm">
+            <input
+              type="checkbox"
+              className="mt-0.5"
+              checked={!!value[p.key]}
+              onChange={(e) => onChange({ ...value, [p.key]: e.target.checked })}
+            />
+            <span>
+              <span className="font-medium text-ink-800">{p.label}</span>
+              <span className="block text-xs text-ink-500">{p.hint}</span>
+            </span>
+          </label>
+        ))}
+      </div>
     </div>
   );
 }
