@@ -879,6 +879,144 @@ def migrate_ownerless(user: dict = Depends(require_user)) -> dict[str, Any]:
     return {"ok": True, "stamped": stamped, "claimed_by": uid}
 
 
+# ---------- Bulk delete + deals purge ----------
+
+
+@app.post("/api/buildings/bulk-delete")
+def bulk_delete_buildings(
+    payload: dict[str, Any],
+    user: dict = Depends(require_user),
+) -> dict[str, Any]:
+    ids = [str(x) for x in (payload.get("ids") or []) if x]
+    if not ids:
+        return {"ok": True, "deleted": 0, "cascade": {}}
+    db = get_db()
+    cascade = {"buildings": 0, "underwriting": 0, "deals": 0, "om_ingestions": 0, "contact_links": 0}
+    for bid in ids:
+        snap = db.collection("buildings").document(bid).get()
+        if not snap.exists:
+            continue
+        owner = (snap.to_dict() or {}).get("owner_uid")
+        if owner and not _can_access(user["uid"], owner):
+            continue
+        for uw in db.collection("underwriting").where(
+            filter=gcfs.FieldFilter("building_id", "==", bid)
+        ).stream():
+            uw.reference.delete()
+            cascade["underwriting"] += 1
+        for d in db.collection("deals").where(
+            filter=gcfs.FieldFilter("building_id", "==", bid)
+        ).stream():
+            d.reference.delete()
+            cascade["deals"] += 1
+        for ing in db.collection("om_ingestions").where(
+            filter=gcfs.FieldFilter("building_id", "==", bid)
+        ).stream():
+            ing.reference.delete()
+            cascade["om_ingestions"] += 1
+        for c in db.collection("contacts").where(
+            filter=gcfs.FieldFilter("related_buildings", "array-contains", bid)
+        ).stream():
+            data = c.to_dict() or {}
+            related = [x for x in (data.get("related_buildings") or []) if x != bid]
+            c.reference.update({"related_buildings": related, "updated_at": gcfs.SERVER_TIMESTAMP})
+            cascade["contact_links"] += 1
+        snap.reference.delete()
+        cascade["buildings"] += 1
+    return {"ok": True, "deleted": cascade["buildings"], "cascade": cascade}
+
+
+@app.post("/api/contacts/bulk-delete")
+def bulk_delete_contacts(
+    payload: dict[str, Any],
+    user: dict = Depends(require_user),
+) -> dict[str, Any]:
+    ids = [str(x) for x in (payload.get("ids") or []) if x]
+    if not ids:
+        return {"ok": True, "deleted": 0, "cascade": {}}
+    db = get_db()
+    cascade = {"contacts": 0, "deal_links": 0}
+    for cid in ids:
+        snap = db.collection("contacts").document(cid).get()
+        if not snap.exists:
+            continue
+        owner = (snap.to_dict() or {}).get("owner_uid")
+        if owner and not _can_access(user["uid"], owner):
+            continue
+        for d in db.collection("deals").where(
+            filter=gcfs.FieldFilter("contact_ids", "array-contains", cid)
+        ).stream():
+            data = d.to_dict() or {}
+            cids = [x for x in (data.get("contact_ids") or []) if x != cid]
+            d.reference.update({"contact_ids": cids, "updated_at": gcfs.SERVER_TIMESTAMP})
+            cascade["deal_links"] += 1
+        snap.reference.delete()
+        cascade["contacts"] += 1
+    return {"ok": True, "deleted": cascade["contacts"], "cascade": cascade}
+
+
+@app.post("/api/deals/purge")
+def purge_deals(
+    payload: dict[str, Any] | None = None,
+    user: dict = Depends(require_user),
+) -> dict[str, Any]:
+    """Hard-delete every deal doc in the caller's active workspace."""
+    db = get_db()
+    requested = (payload or {}).get("workspace_owner_uid") if payload else None
+    ws = requested if (requested and _can_access(user["uid"], requested)) else _effective_workspace(user["uid"])
+    n = 0
+    for d in db.collection("deals").where(
+        filter=gcfs.FieldFilter("owner_uid", "==", ws)
+    ).stream():
+        d.reference.delete()
+        n += 1
+    log.info("purge_deals ws=%s removed=%d", ws, n)
+    return {"ok": True, "deleted": n, "workspace_owner_uid": ws}
+
+
+# ---------- Excel export ----------
+
+
+@app.get("/api/underwriting/{building_id}/export.xlsx")
+def export_underwriting_xlsx(building_id: str, user: dict = Depends(require_user)):
+    from fastapi.responses import StreamingResponse
+    from .xlsx_export import build_underwriting_workbook
+
+    db = get_db()
+    b_snap = db.collection("buildings").document(building_id).get()
+    if not b_snap.exists:
+        raise HTTPException(status_code=404, detail="Building not found")
+    building = b_snap.to_dict() or {}
+    owner = building.get("owner_uid")
+    if owner and not _can_access(user["uid"], owner):
+        raise HTTPException(status_code=404, detail="Building not found")
+    uw_doc = None
+    for uw in db.collection("underwriting").where(
+        filter=gcfs.FieldFilter("building_id", "==", building_id)
+    ).stream():
+        uw_doc = uw.to_dict() or {}
+        break
+    if not uw_doc:
+        # fall back to a fresh default model
+        from .underwriting import default_assumptions
+        uw_doc = {
+            "building_id": building_id,
+            "asset_class": building.get("asset_class", "multifamily"),
+            "ttm": {"revenue": [], "expenses": [], "noi": 0},
+            "proforma_12mo": {"revenue": [], "expenses": [], "noi": 0},
+            "assumptions": default_assumptions(building.get("asset_class", "multifamily")),
+            "rent_roll": [],
+        }
+    buf = build_underwriting_workbook(building, uw_doc)
+    addr = (building.get("address") or "underwriting").replace("/", "_").replace(" ", "_")[:80]
+    fname = f"{addr}_underwriting.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(_, exc: Exception):
     log.exception("Unhandled error: %s", exc)

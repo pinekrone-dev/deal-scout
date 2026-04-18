@@ -8,7 +8,7 @@ import BuildingsPage from './pages/BuildingsPage';
 import BuildingDetailPage from './pages/BuildingDetailPage';
 import ContactsPage from './pages/ContactsPage';
 import ContactDetailPage from './pages/ContactDetailPage';
-import DealsPage from './pages/DealsPage';
+import UnderwritingPage from './pages/UnderwritingPage';
 import IngestPage from './pages/IngestPage';
 import SettingsPage from './pages/SettingsPage';
 import InviteAcceptPage from './pages/InviteAcceptPage';
@@ -46,7 +46,8 @@ export default function App() {
             <Route path="/buildings/:id" element={<BuildingDetailPage />} />
             <Route path="/contacts" element={<ContactsPage />} />
             <Route path="/contacts/:id" element={<ContactDetailPage />} />
-            <Route path="/deals" element={<DealsPage />} />
+            <Route path="/underwriting" element={<UnderwritingPage />} />
+            <Route path="/underwriting/:id" element={<UnderwritingPage />} />
             <Route path="/ingest/:ingestionId" element={<IngestPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Route>

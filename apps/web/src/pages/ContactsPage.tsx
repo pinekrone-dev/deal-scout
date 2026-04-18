@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { addDoc, collection, deleteDoc, doc, onSnapshot, query, Timestamp, where } from 'firebase/firestore';
+import { addDoc, collection, onSnapshot, query, Timestamp, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -14,7 +14,8 @@ export default function ContactsPage() {
   const { currentOwnerUid, current } = useWorkspace();
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState('');
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [bulkBusy, setBulkBusy] = useState(false);
   const nav = useNavigate();
 
   useEffect(() => {
@@ -31,6 +32,11 @@ export default function ContactsPage() {
           return bu - au;
         });
         setRows(out);
+        setSelected((prev) => {
+          const next: Record<string, boolean> = {};
+          for (const r of out) if (prev[r.id]) next[r.id] = true;
+          return next;
+        });
       },
       (err) => {
         // eslint-disable-next-line no-console
@@ -50,6 +56,30 @@ export default function ContactsPage() {
     );
   }, [rows, filter]);
 
+  const selectedIds = useMemo(
+    () => filtered.filter((r) => selected[r.id]).map((r) => r.id),
+    [filtered, selected]
+  );
+  const selCount = selectedIds.length;
+  const allFilteredSelected = filtered.length > 0 && filtered.every((r) => selected[r.id]);
+
+  function toggleAll() {
+    setSelected((prev) => {
+      if (allFilteredSelected) {
+        const next = { ...prev };
+        for (const r of filtered) delete next[r.id];
+        return next;
+      }
+      const next = { ...prev };
+      for (const r of filtered) next[r.id] = true;
+      return next;
+    });
+  }
+
+  function toggle(id: string) {
+    setSelected((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
   async function createBlank() {
     if (!user || !currentOwnerUid) return;
     const now = Date.now();
@@ -63,25 +93,26 @@ export default function ContactsPage() {
     nav(`/contacts/${ref.id}`);
   }
 
-  async function removeContact(id: string, name: string) {
-    if (!window.confirm(`Delete "${name || 'this contact'}" and unlink from deals? This cannot be undone.`)) {
-      return;
-    }
-    setDeleting(id);
+  async function bulkDelete() {
+    if (selCount === 0) return;
+    const msg =
+      selCount === 1
+        ? 'Delete 1 selected contact and unlink from deals? This cannot be undone.'
+        : `Delete ${selCount} selected contacts and unlink from deals? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+    setBulkBusy(true);
     try {
-      const res = await apiFetch(`/api/contacts/${id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const text = await res.text();
-        if (res.status === 404 || res.status === 405) {
-          await deleteDoc(doc(db, 'contacts', id));
-        } else {
-          throw new Error(`${res.status} ${text}`);
-        }
-      }
+      const res = await apiFetch('/api/contacts/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedIds }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      setSelected({});
     } catch (e) {
       alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setDeleting(null);
+      setBulkBusy(false);
     }
   }
 
@@ -100,30 +131,55 @@ export default function ContactsPage() {
         <button className="btn-primary" onClick={createBlank}>New Contact</button>
       </div>
 
-      <div className="card p-3">
+      <div className="card p-3 flex flex-wrap items-center gap-3">
         <input
           className="field max-w-md"
           placeholder="Search name, firm, email..."
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
+        <div className="flex-1" />
+        {selCount > 0 ? (
+          <button
+            className="btn text-red-700 border-red-300 hover:bg-red-50"
+            disabled={bulkBusy}
+            onClick={bulkDelete}
+          >
+            {bulkBusy ? 'Deleting...' : `Delete selected (${selCount})`}
+          </button>
+        ) : null}
       </div>
 
       <div className="card overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr>
+              <th className="th w-8">
+                <input
+                  type="checkbox"
+                  checked={allFilteredSelected}
+                  onChange={toggleAll}
+                  aria-label="Select all"
+                />
+              </th>
               <th className="th">Name</th>
               <th className="th">Role</th>
               <th className="th">Firm</th>
               <th className="th">Email</th>
               <th className="th">Phone</th>
-              <th className="th"></th>
             </tr>
           </thead>
           <tbody>
             {filtered.map((r) => (
-              <tr key={r.id} className="hover:bg-ink-50">
+              <tr key={r.id} className={`hover:bg-ink-50 ${selected[r.id] ? 'bg-accent-50' : ''}`}>
+                <td className="td">
+                  <input
+                    type="checkbox"
+                    checked={!!selected[r.id]}
+                    onChange={() => toggle(r.id)}
+                    aria-label={`Select ${r.name}`}
+                  />
+                </td>
                 <td className="td">
                   <Link to={`/contacts/${r.id}`} className="text-accent-600 hover:underline">{r.name}</Link>
                 </td>
@@ -131,15 +187,6 @@ export default function ContactsPage() {
                 <td className="td">{r.firm ?? ''}</td>
                 <td className="td">{r.email ?? ''}</td>
                 <td className="td">{r.phone ?? ''}</td>
-                <td className="td text-right">
-                  <button
-                    className="btn-ghost text-xs text-red-600"
-                    onClick={() => removeContact(r.id, r.name || '')}
-                    disabled={deleting === r.id}
-                  >
-                    {deleting === r.id ? '...' : 'Delete'}
-                  </button>
-                </td>
               </tr>
             ))}
             {filtered.length === 0 ? (

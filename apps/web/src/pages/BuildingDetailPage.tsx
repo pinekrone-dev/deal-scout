@@ -17,13 +17,11 @@ import { db, auth } from '../lib/firebase';
 import { useAuth } from '../lib/auth';
 import { useWorkspace } from '../lib/workspace';
 import { apiFetch } from '../lib/api';
-import type { AssetClass, Building, Contact, Underwriting } from '../types';
+import type { AssetClass, Building, Contact } from '../types';
 import { ASSET_CLASSES } from '../types';
-import UnderwritingPanel from '../components/UnderwritingPanel';
-import { blankUnderwriting } from '../underwriting/engine';
 import { fmtNum, fmtPct, fmtUSD, parseNum } from '../lib/format';
 
-type Tab = 'overview' | 'underwriting' | 'documents' | 'contacts';
+type Tab = 'overview' | 'documents' | 'contacts';
 
 export default function BuildingDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -34,8 +32,6 @@ export default function BuildingDetailPage() {
   const [building, setBuilding] = useState<Building | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
-  const [underwriting, setUnderwriting] = useState<Underwriting | null>(null);
-  const [uwLoading, setUwLoading] = useState(true);
   const [contacts, setContacts] = useState<(Contact & { id: string })[]>([]);
   const [deleting, setDeleting] = useState(false);
 
@@ -83,42 +79,6 @@ export default function BuildingDetailPage() {
   useEffect(() => {
     if (!id || !user || !buildingOwnerUid) return;
     const q = query(
-      collection(db, 'underwriting'),
-      where('owner_uid', '==', buildingOwnerUid),
-      where('building_id', '==', id)
-    );
-    const unsub = onSnapshot(
-      q,
-      (snap) => {
-        if (!snap.empty) {
-          let best: Underwriting | null = null;
-          let bestV = -1;
-          snap.forEach((d) => {
-            const data = d.data() as Underwriting;
-            const v = typeof data.version === 'number' ? data.version : 0;
-            if (v > bestV) {
-              bestV = v;
-              best = { id: d.id, ...data };
-            }
-          });
-          setUnderwriting(best);
-        } else {
-          setUnderwriting(null);
-        }
-        setUwLoading(false);
-      },
-      (err) => {
-        // eslint-disable-next-line no-console
-        console.error('underwriting query failed', err);
-        setUwLoading(false);
-      }
-    );
-    return () => unsub();
-  }, [id, user, buildingOwnerUid]);
-
-  useEffect(() => {
-    if (!id || !user || !buildingOwnerUid) return;
-    const q = query(
       collection(db, 'contacts'),
       where('owner_uid', '==', buildingOwnerUid),
       where('related_buildings', 'array-contains', id)
@@ -134,32 +94,6 @@ export default function BuildingDetailPage() {
   async function patchBuilding(p: Partial<Building>) {
     if (!id) return;
     await updateDoc(doc(db, 'buildings', id), { ...p, updated_at: Timestamp.fromMillis(Date.now()) });
-  }
-
-  async function createInitialUnderwriting() {
-    if (!id || !building || !user || !buildingOwnerUid) return;
-    const uw = blankUnderwriting({ ...building, id });
-    const ref = await addDoc(collection(db, 'underwriting'), {
-      ...uw,
-      owner_uid: buildingOwnerUid,
-      created_at: Timestamp.fromMillis(Date.now())
-    });
-    setUnderwriting({ ...uw, id: ref.id });
-  }
-
-  async function saveNewVersion(uw: Underwriting) {
-    if (!id || !user || !buildingOwnerUid) return;
-    const nextVersion = (underwriting?.version ?? 0) + 1;
-    const payload = { ...uw, version: nextVersion, building_id: id };
-    await setDoc(doc(collection(db, 'underwriting')), {
-      ...payload,
-      owner_uid: buildingOwnerUid,
-      created_at: Timestamp.fromMillis(Date.now())
-    });
-    await patchBuilding({
-      current_noi: uw.ttm.noi,
-      cap_rate: building?.asking_price ? uw.ttm.noi / building.asking_price : undefined
-    });
   }
 
   async function deleteBuilding() {
@@ -239,7 +173,7 @@ export default function BuildingDetailPage() {
       </div>
 
       <div className="flex items-center gap-1 border-b border-ink-200">
-        {(['overview', 'underwriting', 'documents', 'contacts'] as Tab[]).map((t) => (
+        {(['overview', 'documents', 'contacts'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -253,28 +187,6 @@ export default function BuildingDetailPage() {
       </div>
 
       {tab === 'overview' ? <OverviewTab building={building} patch={patchBuilding} /> : null}
-
-      {tab === 'underwriting' ? (
-        <div>
-          {uwLoading ? (
-            <div className="text-sm text-ink-500">Loading underwriting...</div>
-          ) : underwriting ? (
-            <UnderwritingPanel
-              building={building}
-              initial={underwriting}
-              onSave={saveNewVersion}
-            />
-          ) : (
-            <div className="card p-6 text-center">
-              <div className="text-ink-700 font-medium">No underwriting yet.</div>
-              <div className="text-sm text-ink-500">Start with a template based on asset class.</div>
-              <button className="btn-primary mt-4" onClick={createInitialUnderwriting}>
-                Create Underwriting
-              </button>
-            </div>
-          )}
-        </div>
-      ) : null}
 
       {tab === 'documents' ? <DocumentsTab building={building} /> : null}
 

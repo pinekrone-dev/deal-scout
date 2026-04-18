@@ -19,7 +19,7 @@ export default function Shell() {
           <nav className="flex items-center gap-1">
             <NavLink to="/" end className={linkCls}>Dashboard</NavLink>
             <NavLink to="/buildings" className={linkCls}>Buildings</NavLink>
-            <NavLink to="/deals" className={linkCls}>Deals</NavLink>
+            <NavLink to="/underwriting" className={linkCls}>Underwriting</NavLink>
             <NavLink to="/contacts" className={linkCls}>Contacts</NavLink>
             <NavLink to="/settings" className={linkCls}>Settings</NavLink>
           </nav>

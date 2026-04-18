@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { addDoc, collection, deleteDoc, doc, onSnapshot, query, Timestamp, where } from 'firebase/firestore';
+import { addDoc, collection, onSnapshot, query, Timestamp, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { apiFetch, uploadOM } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -18,7 +18,8 @@ export default function BuildingsPage() {
   const [filter, setFilter] = useState('');
   const [assetFilter, setAssetFilter] = useState<AssetClass | ''>('');
   const [uploading, setUploading] = useState(false);
-  const [deleting, setDeleting] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [bulkBusy, setBulkBusy] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const nav = useNavigate();
 
@@ -36,6 +37,12 @@ export default function BuildingsPage() {
           return bu - au;
         });
         setRows(out);
+        // Prune selections for rows that disappeared.
+        setSelected((prev) => {
+          const next: Record<string, boolean> = {};
+          for (const r of out) if (prev[r.id]) next[r.id] = true;
+          return next;
+        });
       },
       (err) => {
         // eslint-disable-next-line no-console
@@ -59,17 +66,36 @@ export default function BuildingsPage() {
     });
   }, [rows, filter, assetFilter]);
 
+  const selectedIds = useMemo(
+    () => filtered.filter((r) => selected[r.id]).map((r) => r.id),
+    [filtered, selected]
+  );
+  const selCount = selectedIds.length;
+  const allFilteredSelected = filtered.length > 0 && filtered.every((r) => selected[r.id]);
+
+  function toggleAll() {
+    setSelected((prev) => {
+      if (allFilteredSelected) {
+        const next = { ...prev };
+        for (const r of filtered) delete next[r.id];
+        return next;
+      }
+      const next = { ...prev };
+      for (const r of filtered) next[r.id] = true;
+      return next;
+    });
+  }
+
+  function toggle(id: string) {
+    setSelected((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
   async function createBlank() {
     if (!user || !currentOwnerUid) return;
     const now = Date.now();
-    const payload: Building = {
+    const ref = await addDoc(collection(db, 'buildings'), {
       address: 'New Building',
       asset_class: 'multifamily',
-      created_at: now,
-      updated_at: now
-    };
-    const ref = await addDoc(collection(db, 'buildings'), {
-      ...payload,
       owner_uid: currentOwnerUid,
       created_at: Timestamp.fromMillis(now),
       updated_at: Timestamp.fromMillis(now)
@@ -91,27 +117,26 @@ export default function BuildingsPage() {
     }
   }
 
-  async function removeBuilding(id: string, address: string) {
-    if (!window.confirm(`Delete "${address || 'this building'}" and all of its underwriting, deals, and OM files? This cannot be undone.`)) {
-      return;
-    }
-    setDeleting(id);
+  async function bulkDelete() {
+    if (selCount === 0) return;
+    const msg =
+      selCount === 1
+        ? 'Delete 1 selected building and all linked underwriting, deals, and OM files? This cannot be undone.'
+        : `Delete ${selCount} selected buildings and all linked underwriting, deals, and OM files? This cannot be undone.`;
+    if (!window.confirm(msg)) return;
+    setBulkBusy(true);
     try {
-      // Prefer API endpoint for proper cascade. Fall back to Firestore delete if API fails.
-      const res = await apiFetch(`/api/buildings/${id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const text = await res.text();
-        if (res.status === 404 || res.status === 405) {
-          // API doesn't have the endpoint yet — fall back to direct delete.
-          await deleteDoc(doc(db, 'buildings', id));
-        } else {
-          throw new Error(`${res.status} ${text}`);
-        }
-      }
+      const res = await apiFetch('/api/buildings/bulk-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedIds }),
+      });
+      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      setSelected({});
     } catch (e) {
       alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
-      setDeleting(null);
+      setBulkBusy(false);
     }
   }
 
@@ -164,12 +189,30 @@ export default function BuildingsPage() {
             <option key={c} value={c}>{c}</option>
           ))}
         </select>
+        <div className="flex-1" />
+        {selCount > 0 ? (
+          <button
+            className="btn text-red-700 border-red-300 hover:bg-red-50"
+            disabled={bulkBusy}
+            onClick={bulkDelete}
+          >
+            {bulkBusy ? 'Deleting...' : `Delete selected (${selCount})`}
+          </button>
+        ) : null}
       </div>
 
       <div className="card overflow-x-auto">
         <table className="w-full">
           <thead>
             <tr>
+              <th className="th w-8">
+                <input
+                  type="checkbox"
+                  checked={allFilteredSelected}
+                  onChange={toggleAll}
+                  aria-label="Select all"
+                />
+              </th>
               <th className="th">Address</th>
               <th className="th">Asset</th>
               <th className="th text-right">Units / SF</th>
@@ -177,12 +220,19 @@ export default function BuildingsPage() {
               <th className="th text-right">Asking</th>
               <th className="th text-right">Cap</th>
               <th className="th text-right">Occ</th>
-              <th className="th"></th>
             </tr>
           </thead>
           <tbody>
             {filtered.map((r) => (
-              <tr key={r.id} className="hover:bg-ink-50">
+              <tr key={r.id} className={`hover:bg-ink-50 ${selected[r.id] ? 'bg-accent-50' : ''}`}>
+                <td className="td">
+                  <input
+                    type="checkbox"
+                    checked={!!selected[r.id]}
+                    onChange={() => toggle(r.id)}
+                    aria-label={`Select ${r.address}`}
+                  />
+                </td>
                 <td className="td">
                   <Link to={`/buildings/${r.id}`} className="text-accent-600 hover:underline">
                     {r.address || '(untitled)'}
@@ -200,16 +250,6 @@ export default function BuildingsPage() {
                 <td className="td num">{fmtUSD(r.asking_price ?? null)}</td>
                 <td className="td num">{fmtPct(r.cap_rate ?? null)}</td>
                 <td className="td num">{fmtPct(r.occupancy ?? null, 1)}</td>
-                <td className="td text-right">
-                  <button
-                    className="btn-ghost text-xs text-red-600"
-                    onClick={() => removeBuilding(r.id, r.address || '')}
-                    disabled={deleting === r.id}
-                    title="Delete building"
-                  >
-                    {deleting === r.id ? '...' : 'Delete'}
-                  </button>
-                </td>
               </tr>
             ))}
             {filtered.length === 0 ? (
