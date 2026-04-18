@@ -49,15 +49,34 @@ Fields to extract (omit any that are not present; never invent values):
     { "name": string, "role": one of [broker, sponsor, owner, lender, tenant, other], "firm": string, "email": string, "phone": string }
   ],
   "financials": {
+    "ttm_period": {
+      "start_month": string like "2024-05",
+      "end_month": string like "2025-04",
+      "label": string like "T12 Apr 2024 - Mar 2025"
+    },
     "ttm": {
       "revenue": [ { "label": string, "amount": number } ],
       "expenses": [ { "label": string, "amount": number } ]
+    },
+    "ttm_monthly": {
+      "months": [ string like "2024-05", "2024-06", ... ] (exactly 12 entries, oldest first),
+      "revenue": [ { "label": string, "amounts": [number, number, ... 12 numbers] } ],
+      "expenses": [ { "label": string, "amounts": [number, number, ... 12 numbers] } ]
+    },
+    "proforma_12mo": {
+      "months": [ string like "2025-05", ... ] (exactly 12 entries, starting the month after ttm_monthly ends),
+      "revenue": [ { "label": string, "amounts": [number, ... 12 numbers] } ],
+      "expenses": [ { "label": string, "amounts": [number, ... 12 numbers] } ]
     }
   }
 }
 
 Rules:
 - Prefer T12 actuals when the OM shows them. If only proforma is shown, extract proforma and note that in building.notes.
+- Always fill `ttm.revenue` and `ttm.expenses` with annual totals per line. `ttm_monthly` is the month-by-month breakdown if the OM provides monthly P&L or trailing-12 schedule. Skip `ttm_monthly` entirely if no monthly data is shown; do not evenly divide annual numbers.
+- If the OM includes a sponsor's year-1 proforma with monthly schedule, capture it in `proforma_12mo`. If the OM shows only an annual proforma, skip `proforma_12mo`.
+- Line item `label` must match across `ttm` and `ttm_monthly` (same category names, same order). Same for `proforma_12mo` if included.
+- Annual amount per line should equal the sum of its 12 monthly values (within rounding).
 - Convert all monetary values to absolute USD, no thousands separators or currency symbols.
 - Express percentages as decimals (7.5 percent becomes 0.075).
 - If the asset class is not explicit, infer from unit count, SF, hospitality language, or storage language. Default to multifamily only if unit count is present without conflicting signals.
@@ -127,7 +146,7 @@ def extract_from_documents(
         config=types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
-            max_output_tokens=8192,
+            max_output_tokens=32768,
         ),
     )
     text = response.text or ""

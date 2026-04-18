@@ -134,6 +134,17 @@ export type Statement = {
   noi: number;
 };
 
+// Monthly breakdown of a statement. `months` is an array of YYYY-MM strings
+// (exactly 12 entries, oldest first). Each line item has an `amounts` array
+// of 12 monthly values aligned with `months`.
+export type MonthlyLine = { label: string; amounts: number[] };
+export type MonthlyStatement = {
+  months: string[];
+  revenue: MonthlyLine[];
+  expenses: MonthlyLine[];
+  source?: 'om' | 'derived' | 'manual';
+};
+
 export type Returns = {
   irr: number | null;
   equity_multiple: number | null;
@@ -146,7 +157,10 @@ export type Underwriting = {
   building_id: string;
   asset_class: AssetClass;
   ttm: Statement;
+  ttm_period?: { start_month?: string; end_month?: string; label?: string };
+  ttm_monthly?: MonthlyStatement | null; // populated by OM when available
   proforma_12mo: Statement;
+  proforma_12mo_monthly?: MonthlyStatement | null; // populated by OM or derived
   assumptions: Assumptions;
   rent_roll?: RentRollRow[]; // multifamily
   lease_roll?: LeaseRollRow[]; // office / retail / industrial

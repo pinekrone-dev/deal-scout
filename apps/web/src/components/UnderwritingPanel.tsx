@@ -1,9 +1,55 @@
 import { useEffect, useMemo, useState } from 'react';
-import type { Assumptions, Building, LineItem, Statement, Underwriting } from '../types';
+import type { Assumptions, Building, LineItem, MonthlyStatement, Statement, Underwriting } from '../types';
 import { fmtPct, fmtUSD, parseNum } from '../lib/format';
 import { buildProformaFromTtm, computeNoi, computeReturns } from '../underwriting/engine';
 
-type UwTab = 'financials' | 'assumptions' | 'rent-roll' | 'lease-roll';
+type UwTab = 'financials' | 'proforma-12' | 'assumptions' | 'rent-roll' | 'lease-roll';
+
+function _bumpMonth(ym: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(ym);
+  if (!m) return ym;
+  return `${Number(m[1]) + 1}-${m[2]}`;
+}
+
+function deriveProformaMonthly(ttm: MonthlyStatement | null | undefined, a: Assumptions): MonthlyStatement | null {
+  if (!ttm) return null;
+  const rg = a.rent_growth_pct ?? 0;
+  const eg = a.expense_growth_pct ?? 0;
+  const months = (ttm.months || []).map(_bumpMonth);
+  const revenue = (ttm.revenue || []).map((li) => ({
+    label: li.label,
+    amounts: (li.amounts || []).map((x) => Math.round(x * (1 + rg) * 100) / 100),
+  }));
+  const expenses = (ttm.expenses || []).map((li) => ({
+    label: li.label,
+    amounts: (li.amounts || []).map((x) => Math.round(x * (1 + eg) * 100) / 100),
+  }));
+  return { months, revenue, expenses, source: 'derived' };
+}
+
+function sumLine(arr: number[] | undefined): number {
+  if (!arr) return 0;
+  let s = 0;
+  for (const n of arr) if (typeof n === 'number' && isFinite(n)) s += n;
+  return s;
+}
+
+function monthlyNoiSeries(m: MonthlyStatement | null | undefined): number[] {
+  if (!m) return [];
+  const rev: number[] = new Array(12).fill(0);
+  const exp: number[] = new Array(12).fill(0);
+  for (const li of m.revenue || []) for (let i = 0; i < 12; i++) rev[i] += li.amounts?.[i] ?? 0;
+  for (const li of m.expenses || []) for (let i = 0; i < 12; i++) exp[i] += li.amounts?.[i] ?? 0;
+  return rev.map((r, i) => r - exp[i]);
+}
+
+function formatMonthLabel(ym: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(ym);
+  if (!m) return ym || '';
+  const names = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const n = Number(m[2]);
+  return `${names[n - 1] ?? m[2]} ${m[1].slice(2)}`;
+}
 
 export default function UnderwritingPanel({
   building,
@@ -18,6 +64,8 @@ export default function UnderwritingPanel({
   const [assumptions, setAssumptions] = useState<Assumptions>(initial.assumptions);
   const [rentRoll, setRentRoll] = useState(initial.rent_roll ?? []);
   const [leaseRoll, setLeaseRoll] = useState(initial.lease_roll ?? []);
+  const [ttmMonthly] = useState<MonthlyStatement | null>(initial.ttm_monthly ?? null);
+  const [proformaMonthlyOM] = useState<MonthlyStatement | null>(initial.proforma_12mo_monthly ?? null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [tab, setTab] = useState<UwTab>('financials');
@@ -39,6 +87,12 @@ export default function UnderwritingPanel({
 
   const ttmNoi = useMemo(() => computeNoi(ttm), [ttm]);
   const proformaNoi = useMemo(() => computeNoi(proforma), [proforma]);
+
+  // Prefer the OM's own 12-month proforma; otherwise derive one from TTM monthly.
+  const proformaMonthly = useMemo<MonthlyStatement | null>(() => {
+    if (proformaMonthlyOM) return proformaMonthlyOM;
+    return deriveProformaMonthly(ttmMonthly, assumptions);
+  }, [proformaMonthlyOM, ttmMonthly, assumptions]);
 
   function updateItem(scope: 'revenue' | 'expenses', idx: number, patch: Partial<LineItem>) {
     setTtm((s) => {
@@ -91,8 +145,10 @@ export default function UnderwritingPanel({
   const showLeaseRoll = ['office', 'retail', 'industrial', 'mixed-use'].includes(ac);
   const isLand = ac === 'land';
 
+  const hasMonthly = !!(ttmMonthly || proformaMonthly);
   const tabs: { id: UwTab; label: string; show: boolean }[] = [
     { id: 'financials', label: 'Financials', show: true },
+    { id: 'proforma-12', label: '12-Month Proforma', show: !isLand && hasMonthly },
     { id: 'assumptions', label: 'Assumptions', show: !isLand },
     { id: 'rent-roll', label: 'Rent Roll', show: showRentRoll },
     { id: 'lease-roll', label: 'Lease Roll', show: showLeaseRoll }
@@ -148,6 +204,13 @@ export default function UnderwritingPanel({
             onRemove={removeItem}
           />
         </div>
+      ) : null}
+
+      {tab === 'proforma-12' ? (
+        <MonthlyTables
+          ttm={ttmMonthly}
+          proforma={proformaMonthly}
+        />
       ) : null}
 
       {tab === 'assumptions' && !isLand ? (
@@ -480,6 +543,133 @@ function LeaseRollEditor({
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+function MonthlyGrid({
+  title,
+  tag,
+  data,
+}: {
+  title: string;
+  tag?: string;
+  data: MonthlyStatement;
+}) {
+  const months = (data.months || []).slice(0, 12);
+  while (months.length < 12) months.push('');
+  const revTotals = months.map((_, i) =>
+    (data.revenue || []).reduce((s, li) => s + (li.amounts?.[i] ?? 0), 0)
+  );
+  const expTotals = months.map((_, i) =>
+    (data.expenses || []).reduce((s, li) => s + (li.amounts?.[i] ?? 0), 0)
+  );
+  const noiSeries = monthlyNoiSeries(data);
+  const revAnnual = revTotals.reduce((a, b) => a + b, 0);
+  const expAnnual = expTotals.reduce((a, b) => a + b, 0);
+  const noiAnnual = noiSeries.reduce((a, b) => a + b, 0);
+
+  return (
+    <div className="card p-3 overflow-x-auto">
+      <div className="flex items-center justify-between mb-2">
+        <div className="font-semibold">{title}</div>
+        {tag ? <span className="pill text-xs">{tag}</span> : null}
+      </div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr>
+            <th className="th text-left sticky left-0 bg-white z-10 min-w-[160px]">Line item</th>
+            {months.map((m, i) => (
+              <th key={i} className="th text-right whitespace-nowrap">{formatMonthLabel(m)}</th>
+            ))}
+            <th className="th text-right whitespace-nowrap">Annual</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr className="bg-ink-50">
+            <td colSpan={14} className="td text-[11px] uppercase tracking-wide font-semibold text-ink-600">Revenue</td>
+          </tr>
+          {(data.revenue || []).map((li, idx) => (
+            <tr key={`r-${idx}`}>
+              <td className="td sticky left-0 bg-white z-10">{li.label}</td>
+              {months.map((_, i) => (
+                <td key={i} className="td num">{fmtUSD(li.amounts?.[i] ?? 0)}</td>
+              ))}
+              <td className="td num font-medium">{fmtUSD(sumLine(li.amounts))}</td>
+            </tr>
+          ))}
+          <tr className="bg-ink-50">
+            <td className="td font-semibold sticky left-0 bg-ink-50 z-10">Total revenue</td>
+            {revTotals.map((v, i) => (
+              <td key={i} className="td num font-semibold">{fmtUSD(v)}</td>
+            ))}
+            <td className="td num font-semibold">{fmtUSD(revAnnual)}</td>
+          </tr>
+
+          <tr className="bg-ink-50">
+            <td colSpan={14} className="td text-[11px] uppercase tracking-wide font-semibold text-ink-600">Expenses</td>
+          </tr>
+          {(data.expenses || []).map((li, idx) => (
+            <tr key={`e-${idx}`}>
+              <td className="td sticky left-0 bg-white z-10">{li.label}</td>
+              {months.map((_, i) => (
+                <td key={i} className="td num">{fmtUSD(li.amounts?.[i] ?? 0)}</td>
+              ))}
+              <td className="td num font-medium">{fmtUSD(sumLine(li.amounts))}</td>
+            </tr>
+          ))}
+          <tr className="bg-ink-50">
+            <td className="td font-semibold sticky left-0 bg-ink-50 z-10">Total expenses</td>
+            {expTotals.map((v, i) => (
+              <td key={i} className="td num font-semibold">{fmtUSD(v)}</td>
+            ))}
+            <td className="td num font-semibold">{fmtUSD(expAnnual)}</td>
+          </tr>
+
+          <tr className="bg-accent-50">
+            <td className="td font-bold sticky left-0 bg-accent-50 z-10">NOI</td>
+            {noiSeries.map((v, i) => (
+              <td key={i} className="td num font-bold">{fmtUSD(v)}</td>
+            ))}
+            <td className="td num font-bold">{fmtUSD(noiAnnual)}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function MonthlyTables({
+  ttm,
+  proforma,
+}: {
+  ttm: MonthlyStatement | null;
+  proforma: MonthlyStatement | null;
+}) {
+  if (!ttm && !proforma) {
+    return (
+      <div className="card p-4 text-sm text-ink-500">
+        The OM did not include a month-by-month P&amp;L, so we can't show a 12-month view here.
+        Upload a T12 or monthly operating statement and the system will populate this tab automatically.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      {ttm ? (
+        <MonthlyGrid
+          title="TTM monthly (from OM)"
+          tag={ttm.source === 'om' ? 'OM source' : 'Derived'}
+          data={ttm}
+        />
+      ) : null}
+      {proforma ? (
+        <MonthlyGrid
+          title="12-Month Proforma"
+          tag={proforma.source === 'om' ? 'OM source' : 'Derived from TTM + growth'}
+          data={proforma}
+        />
+      ) : null}
     </div>
   );
 }

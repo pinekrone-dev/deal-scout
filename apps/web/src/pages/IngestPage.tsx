@@ -27,6 +27,17 @@ type Extracted = {
   contacts?: Array<Partial<Contact>>;
   financials?: {
     ttm?: { revenue?: Array<{ label: string; amount: number }>; expenses?: Array<{ label: string; amount: number }> };
+    ttm_period?: { start_month?: string; end_month?: string; label?: string };
+    ttm_monthly?: {
+      months?: string[];
+      revenue?: Array<{ label: string; amounts: number[] }>;
+      expenses?: Array<{ label: string; amounts: number[] }>;
+    };
+    proforma_12mo?: {
+      months?: string[];
+      revenue?: Array<{ label: string; amounts: number[] }>;
+      expenses?: Array<{ label: string; amounts: number[] }>;
+    };
   };
 };
 
@@ -179,8 +190,18 @@ export default function IngestPage() {
       </div>
 
       <div className="card p-4 space-y-2">
-        <div className="font-semibold">TTM Financials (preview)</div>
-        <div className="text-xs text-ink-500">These will populate the Underwriting tab. You can edit freely afterward.</div>
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <div className="font-semibold">TTM Financials (preview)</div>
+          <div className="flex items-center gap-2 text-xs">
+            {fin.ttm_period?.label ? <span className="pill">{fin.ttm_period.label}</span> : null}
+            {fin.ttm_monthly ? <span className="pill">Monthly detail extracted</span> : null}
+            {fin.proforma_12mo ? <span className="pill">OM proforma extracted</span> : null}
+          </div>
+        </div>
+        <div className="text-xs text-ink-500">
+          These annual totals will populate the Underwriting tab. If the OM included a monthly P&amp;L or
+          a 12-month proforma, they'll be visible on the Underwriting &rarr; 12-Month Proforma tab.
+        </div>
         <div className="grid grid-cols-2 gap-6">
           <div>
             <div className="label">Revenue</div>

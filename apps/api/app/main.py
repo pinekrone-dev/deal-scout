@@ -125,6 +125,114 @@ def _clean_statement(stmt: Any) -> dict[str, Any]:
     }
 
 
+def _clean_monthly_lines(items: Any) -> list[dict[str, Any]]:
+    """Normalize [{label, amounts:[...]}] lists to exactly 12 float amounts."""
+    if not isinstance(items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for li in items:
+        if not isinstance(li, dict):
+            continue
+        label = li.get("label")
+        label = str(label).strip() if label is not None else ""
+        raw_amts = li.get("amounts")
+        if not isinstance(raw_amts, list):
+            continue
+        amts: list[float] = []
+        for a in raw_amts:
+            n = _num_or_none(a)
+            amts.append(float(n) if n is not None else 0.0)
+        # Pad or truncate to 12 months for consistency.
+        if len(amts) < 12:
+            amts = amts + [0.0] * (12 - len(amts))
+        elif len(amts) > 12:
+            amts = amts[:12]
+        out.append({"label": label or "unlabeled", "amounts": amts})
+    return out
+
+
+def _clean_monthly_statement(stmt: Any, source: str = "om") -> dict[str, Any] | None:
+    """Return a normalized monthly statement or None if there's no usable data."""
+    if not isinstance(stmt, dict):
+        return None
+    months_raw = stmt.get("months")
+    revenue = _clean_monthly_lines(stmt.get("revenue"))
+    expenses = _clean_monthly_lines(stmt.get("expenses"))
+    if not revenue and not expenses:
+        return None
+    months: list[str] = []
+    if isinstance(months_raw, list):
+        for m in months_raw:
+            months.append(str(m) if m is not None else "")
+    # Pad months to 12 slots to align with amounts arrays.
+    if len(months) < 12:
+        months = months + [""] * (12 - len(months))
+    elif len(months) > 12:
+        months = months[:12]
+    return {
+        "months": months,
+        "revenue": revenue,
+        "expenses": expenses,
+        "source": source,
+    }
+
+
+def _monthly_to_annual_totals(monthly: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Convert a monthly statement back to annual {revenue, expenses} totals."""
+    if not monthly:
+        return None
+    rev = [
+        {"label": li["label"], "amount": round(sum(li.get("amounts") or []), 2)}
+        for li in (monthly.get("revenue") or [])
+    ]
+    exp = [
+        {"label": li["label"], "amount": round(sum(li.get("amounts") or []), 2)}
+        for li in (monthly.get("expenses") or [])
+    ]
+    return {"revenue": rev, "expenses": exp}
+
+
+def _derive_proforma_monthly(
+    ttm_monthly: dict[str, Any] | None,
+    a: dict[str, float],
+) -> dict[str, Any] | None:
+    """Given TTM monthly data, produce a 12-month proforma by escalating each
+    line by its growth rate and advancing the month stamps by 12 months."""
+    if not ttm_monthly:
+        return None
+    rent_growth = float(a.get("rent_growth_pct", 0.03))
+    expense_growth = float(a.get("expense_growth_pct", 0.025))
+
+    def _bump_month(ym: str) -> str:
+        try:
+            y, m = ym.split("-")
+            return f"{int(y) + 1}-{m}"
+        except Exception:
+            return ym
+
+    months = [_bump_month(m) for m in (ttm_monthly.get("months") or [])]
+    revenue = [
+        {
+            "label": li["label"],
+            "amounts": [round(x * (1 + rent_growth), 2) for x in (li.get("amounts") or [])],
+        }
+        for li in (ttm_monthly.get("revenue") or [])
+    ]
+    expenses = [
+        {
+            "label": li["label"],
+            "amounts": [round(x * (1 + expense_growth), 2) for x in (li.get("amounts") or [])],
+        }
+        for li in (ttm_monthly.get("expenses") or [])
+    ]
+    return {
+        "months": months,
+        "revenue": revenue,
+        "expenses": expenses,
+        "source": "derived",
+    }
+
+
 def _deep_clean(v: Any) -> Any:
     if v is None:
         return None
@@ -485,6 +593,16 @@ def confirm_ingest(
         financials = payload.get("financials") or {}
         ttm_raw = financials.get("ttm") or {"revenue": [], "expenses": []}
         ttm = _clean_statement(ttm_raw)
+
+        # Monthly breakdowns (when the OM provides them). We clean them first
+        # so we can use the TTM monthly totals to back-fill the annual TTM if
+        # the model only returned a monthly grid.
+        ttm_monthly = _clean_monthly_statement(financials.get("ttm_monthly"), source="om")
+        if ttm_monthly and not (ttm.get("revenue") or ttm.get("expenses")):
+            backfilled = _monthly_to_annual_totals(ttm_monthly)
+            if backfilled:
+                ttm = _clean_statement(backfilled)
+
         try:
             ttm["noi"] = float(compute_noi(ttm))
             if not math.isfinite(ttm["noi"]):
@@ -492,12 +610,32 @@ def confirm_ingest(
         except Exception:
             ttm["noi"] = 0.0
 
+        ttm_period = financials.get("ttm_period") or {}
+        if isinstance(ttm_period, dict):
+            ttm_period = {
+                "start_month": str(ttm_period.get("start_month") or "") or None,
+                "end_month": str(ttm_period.get("end_month") or "") or None,
+                "label": str(ttm_period.get("label") or "") or None,
+            }
+        else:
+            ttm_period = {}
+
         assumptions = default_assumptions(asset_class)
+
+        # Prefer the OM's own 12-month proforma when it provides one. Otherwise
+        # derive it from TTM monthly (if we have it) or from annual TTM.
+        proforma_monthly = _clean_monthly_statement(financials.get("proforma_12mo"), source="om")
+        if not proforma_monthly and ttm_monthly:
+            proforma_monthly = _derive_proforma_monthly(ttm_monthly, assumptions)
 
         uw_id: str | None = None
         try:
-            proforma_raw = build_proforma_from_ttm(ttm, assumptions)
-            proforma = _clean_statement(proforma_raw)
+            if proforma_monthly:
+                derived_annual = _monthly_to_annual_totals(proforma_monthly) or {"revenue": [], "expenses": []}
+                proforma = _clean_statement(derived_annual)
+            else:
+                proforma_raw = build_proforma_from_ttm(ttm, assumptions)
+                proforma = _clean_statement(proforma_raw)
             proforma["noi"] = float(compute_noi(proforma))
             if not math.isfinite(proforma["noi"]):
                 proforma["noi"] = 0.0
@@ -507,7 +645,10 @@ def confirm_ingest(
                 "building_id": building_id,
                 "asset_class": asset_class,
                 "ttm": ttm,
+                "ttm_period": ttm_period,
+                "ttm_monthly": ttm_monthly,
                 "proforma_12mo": proforma,
+                "proforma_12mo_monthly": proforma_monthly,
                 "assumptions": assumptions,
                 "returns": _safe_returns(returns),
                 "version": 1,
@@ -525,7 +666,10 @@ def confirm_ingest(
                     "building_id": building_id,
                     "asset_class": asset_class,
                     "ttm": ttm,
+                    "ttm_period": ttm_period,
+                    "ttm_monthly": ttm_monthly,
                     "proforma_12mo": {"revenue": [], "expenses": [], "noi": 0.0},
+                    "proforma_12mo_monthly": proforma_monthly,
                     "assumptions": assumptions,
                     "returns": {"irr": None, "equity_multiple": None, "coc_yr1": None, "dscr": None},
                     "version": 1,
