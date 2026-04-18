@@ -783,11 +783,92 @@ def create_invite(
     }
     db.collection("invites").document(token).set(invite_doc)
 
+    # If the invited email already has a Firebase account, provision the
+    # workspace_members row now. This makes shared data visible immediately
+    # on the invitee's next sign-in without requiring them to click the
+    # accept link (though the link still works and is idempotent).
+    auto_provisioned = False
+    try:
+        from firebase_admin import auth as fb_auth  # lazy import
+        try:
+            member_record = fb_auth.get_user_by_email(email)
+            member_uid = member_record.uid
+            db.collection("workspace_members").document(f"{uid}_{member_uid}").set({
+                "owner_uid": uid,
+                "member_uid": member_uid,
+                "email": email,
+                "role": "editor",
+                "created_at": gcfs.SERVER_TIMESTAMP,
+            }, merge=True)
+            db.collection("invites").document(token).update({
+                "accepted": True,
+                "accepted_at": gcfs.SERVER_TIMESTAMP,
+                "accepted_by_uid": member_uid,
+                "auto_provisioned": True,
+            })
+            auto_provisioned = True
+        except fb_auth.UserNotFoundError:
+            # Invitee hasn't signed up yet. The click-to-accept flow will
+            # handle provisioning once they sign in.
+            pass
+    except Exception:
+        log.exception("auto-provision invite failed email=%s owner=%s", email, uid)
+
     accept_url = f"{origin}/invite/{token}"
     own_snap = db.collection("users").document(uid).get()
     workspace_name = (own_snap.to_dict() or {}).get("workspace_name") or (user.get("email") or "Workspace")
     emailed = _send_invite_email(email, accept_url, user.get("email") or "A collaborator", workspace_name)
-    return {"token": token, "accept_url": accept_url, "emailed": emailed}
+    return {
+        "token": token,
+        "accept_url": accept_url,
+        "emailed": emailed,
+        "auto_provisioned": auto_provisioned,
+    }
+
+
+@app.post("/api/workspace/invites/{token}/reprovision")
+def reprovision_invite(token: str, user: dict = Depends(require_user)) -> dict[str, Any]:
+    """Force-provision a pending invite if the invitee already has a Firebase
+    account. Callable by the invite owner to heal invites that were created
+    before auto-provisioning landed. Idempotent."""
+    db = get_db()
+    ref = db.collection("invites").document(token)
+    snap = ref.get()
+    if not snap.exists:
+        raise HTTPException(status_code=404, detail="Invite not found")
+    data = snap.to_dict() or {}
+    if data.get("owner_uid") != user["uid"]:
+        raise HTTPException(status_code=403, detail="Not your invite")
+    email = (data.get("email") or "").lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Malformed invite")
+    try:
+        from firebase_admin import auth as fb_auth
+        try:
+            member_record = fb_auth.get_user_by_email(email)
+        except fb_auth.UserNotFoundError:
+            return {"ok": False, "reason": "no_firebase_account", "email": email}
+        member_uid = member_record.uid
+        owner_uid = user["uid"]
+        db.collection("workspace_members").document(f"{owner_uid}_{member_uid}").set({
+            "owner_uid": owner_uid,
+            "member_uid": member_uid,
+            "email": email,
+            "role": data.get("role") or "editor",
+            "created_at": gcfs.SERVER_TIMESTAMP,
+        }, merge=True)
+        ref.update({
+            "accepted": True,
+            "accepted_at": gcfs.SERVER_TIMESTAMP,
+            "accepted_by_uid": member_uid,
+            "auto_provisioned": True,
+        })
+        return {"ok": True, "member_uid": member_uid, "email": email}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.exception("reprovision failed token=%s", token)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/api/workspace/invites/{token}/accept")

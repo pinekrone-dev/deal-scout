@@ -34,6 +34,7 @@ export default function SettingsPage() {
   const [inviteEmail, setInviteEmail] = useState('');
   const [invitingLoad, setInvitingLoad] = useState(false);
   const [justCreatedInvite, setJustCreatedInvite] = useState<CreateInviteResp | null>(null);
+  const [diagnose, setDiagnose] = useState<unknown>(null);
 
   async function reload() {
     try {
@@ -165,6 +166,40 @@ export default function SettingsPage() {
     }
   }
 
+  async function reprovisionInvite(token: string) {
+    setError(null);
+    try {
+      const resp = await apiJson<{ ok: boolean; reason?: string; email?: string }>(
+        `/api/workspace/invites/${token}/reprovision`,
+        { method: 'POST' }
+      );
+      if (!resp.ok) {
+        setError(
+          resp.reason === 'no_firebase_account'
+            ? `${resp.email} hasn't signed up yet. Ask them to sign in once, then click Reprovision again.`
+            : `Could not reprovision: ${JSON.stringify(resp)}`
+        );
+        return;
+      }
+      setMessage(`Provisioned ${resp.email}. They now have access.`);
+      await reloadMembers();
+      await refreshWorkspaces();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function runDiagnose() {
+    setError(null);
+    setDiagnose(null);
+    try {
+      const resp = await apiJson<unknown>('/api/workspace/diagnose');
+      setDiagnose(resp);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
   async function leaveWorkspace() {
     if (!window.confirm('Leave this shared workspace? You will still have your own.')) return;
     try {
@@ -288,6 +323,13 @@ export default function SettingsPage() {
                     >
                       Copy link
                     </button>
+                    <button
+                      className="btn text-xs"
+                      onClick={() => reprovisionInvite(iv.token)}
+                      title="If they've signed up already, this grants access without needing them to click the link."
+                    >
+                      Reprovision
+                    </button>
                     <button className="btn-ghost text-xs text-red-600" onClick={() => revokeInvite(iv.token)}>
                       Revoke
                     </button>
@@ -362,6 +404,24 @@ export default function SettingsPage() {
           <div className="text-xs text-ink-600 whitespace-pre-wrap break-all">
             Result: {migrateResult}
           </div>
+        ) : null}
+      </div>
+
+      <div className="card p-5 space-y-3">
+        <div>
+          <h2 className="font-semibold">Diagnose workspace access</h2>
+          <p className="text-sm text-ink-500">
+            Dumps what the server sees for your account: memberships, invites, and data counts.
+            Useful if sharing isn't working.
+          </p>
+        </div>
+        <div>
+          <button className="btn" onClick={runDiagnose}>Run diagnose</button>
+        </div>
+        {diagnose ? (
+          <pre className="text-xs bg-ink-50 border border-ink-200 rounded p-3 overflow-auto max-h-96">
+            {JSON.stringify(diagnose, null, 2)}
+          </pre>
         ) : null}
       </div>
 
