@@ -56,7 +56,7 @@ def root() -> dict[str, Any]:
 
 @app.get("/healthz")
 def healthz() -> dict[str, Any]:
-    return {"status": "ok", "model": settings.anthropic_model}
+    return {"status": "ok", "model": settings.gemini_model}
 
 
 # ---------- Ingest ----------

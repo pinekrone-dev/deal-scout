@@ -26,7 +26,7 @@ def load_settings() -> Settings:
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
         firebase_project_id=os.getenv("FIREBASE_PROJECT_ID", "reais---prospecter"),
-        firebase_storage_bucket=os.getenv("FIREBASE_STORAGE_BUCKET", "reais---prospecter.appspot.com"),
+        firebase_storage_bucket=os.getenv("FIREBASE_STORAGE_BUCKET", "reais---prospecter.firebasestorage.app"),
         allowed_origins=_csv(
             "ALLOWED_ORIGINS",
             "https://deal-scout-s4vcjek4ra-uw.a.run.app,http://localhost:5173",
