@@ -93,16 +93,27 @@ export default function UnderwritingPage() {
       collection(db, 'underwriting'),
       where('building_id', '==', selectedId)
     );
-    const unsub = onSnapshot(q, (snap) => {
-      if (snap.empty) {
+    const unsub = onSnapshot(
+      q,
+      (snap) => {
+        if (snap.empty) {
+          const b = buildings.find((x) => x.id === selectedId);
+          setUw(b ? emptyUnderwriting(b) : null);
+        } else {
+          const first = snap.docs[0];
+          setUw({ id: first.id, ...(first.data() as Omit<Underwriting, 'id'>) });
+        }
+        setLoadingUw(false);
+      },
+      (err) => {
+        // eslint-disable-next-line no-console
+        console.error('underwriting onSnapshot failed', err);
+        // Fall back to an empty model so the user can at least start editing.
         const b = buildings.find((x) => x.id === selectedId);
         setUw(b ? emptyUnderwriting(b) : null);
-      } else {
-        const first = snap.docs[0];
-        setUw({ id: first.id, ...(first.data() as Omit<Underwriting, 'id'>) });
+        setLoadingUw(false);
       }
-      setLoadingUw(false);
-    });
+    );
     return () => unsub();
   }, [selectedId, buildings]);
 
@@ -236,10 +247,16 @@ export default function UnderwritingPage() {
         <section className="col-span-12 md:col-span-9">
           {!selected ? (
             <div className="card p-8 text-center text-ink-500">
-              Select a property from the list to underwrite it.
+              {buildings.length === 0
+                ? 'No properties in this workspace yet. Add one from the Buildings tab.'
+                : 'Select a property from the list to underwrite it.'}
             </div>
-          ) : loadingUw || !uw ? (
+          ) : loadingUw && !uw ? (
             <div className="card p-8 text-center text-ink-500">Loading model...</div>
+          ) : !uw ? (
+            <div className="card p-8 text-center text-ink-500">
+              Could not load underwriting for this property. Try another property or reload.
+            </div>
           ) : (
             <div className="space-y-4">
               <div className="card p-3 flex items-center justify-between">

@@ -889,41 +889,61 @@ def bulk_delete_buildings(
 ) -> dict[str, Any]:
     ids = [str(x) for x in (payload.get("ids") or []) if x]
     if not ids:
-        return {"ok": True, "deleted": 0, "cascade": {}}
+        return {"ok": True, "deleted": 0, "cascade": {}, "errors": []}
     db = get_db()
     cascade = {"buildings": 0, "underwriting": 0, "deals": 0, "om_ingestions": 0, "contact_links": 0}
+    errors: list[dict[str, str]] = []
     for bid in ids:
-        snap = db.collection("buildings").document(bid).get()
-        if not snap.exists:
-            continue
-        owner = (snap.to_dict() or {}).get("owner_uid")
-        if owner and not _can_access(user["uid"], owner):
-            continue
-        for uw in db.collection("underwriting").where(
-            filter=gcfs.FieldFilter("building_id", "==", bid)
-        ).stream():
-            uw.reference.delete()
-            cascade["underwriting"] += 1
-        for d in db.collection("deals").where(
-            filter=gcfs.FieldFilter("building_id", "==", bid)
-        ).stream():
-            d.reference.delete()
-            cascade["deals"] += 1
-        for ing in db.collection("om_ingestions").where(
-            filter=gcfs.FieldFilter("building_id", "==", bid)
-        ).stream():
-            ing.reference.delete()
-            cascade["om_ingestions"] += 1
-        for c in db.collection("contacts").where(
-            filter=gcfs.FieldFilter("related_buildings", "array-contains", bid)
-        ).stream():
-            data = c.to_dict() or {}
-            related = [x for x in (data.get("related_buildings") or []) if x != bid]
-            c.reference.update({"related_buildings": related, "updated_at": gcfs.SERVER_TIMESTAMP})
-            cascade["contact_links"] += 1
-        snap.reference.delete()
-        cascade["buildings"] += 1
-    return {"ok": True, "deleted": cascade["buildings"], "cascade": cascade}
+        try:
+            snap = db.collection("buildings").document(bid).get()
+            if not snap.exists:
+                continue
+            owner = (snap.to_dict() or {}).get("owner_uid")
+            if owner and not _can_access(user["uid"], owner):
+                errors.append({"id": bid, "error": "not_authorized"})
+                continue
+            # Cascade children. Swallow per-child errors so one bad doc doesn't
+            # kill the whole operation; we still want to delete the building.
+            try:
+                for uw in db.collection("underwriting").where(
+                    filter=gcfs.FieldFilter("building_id", "==", bid)
+                ).stream():
+                    uw.reference.delete()
+                    cascade["underwriting"] += 1
+            except Exception:
+                log.exception("bulk_delete underwriting cascade failed bid=%s", bid)
+            try:
+                for d in db.collection("deals").where(
+                    filter=gcfs.FieldFilter("building_id", "==", bid)
+                ).stream():
+                    d.reference.delete()
+                    cascade["deals"] += 1
+            except Exception:
+                log.exception("bulk_delete deals cascade failed bid=%s", bid)
+            try:
+                for ing in db.collection("om_ingestions").where(
+                    filter=gcfs.FieldFilter("building_id", "==", bid)
+                ).stream():
+                    ing.reference.delete()
+                    cascade["om_ingestions"] += 1
+            except Exception:
+                log.exception("bulk_delete om_ingestions cascade failed bid=%s", bid)
+            try:
+                for c in db.collection("contacts").where(
+                    filter=gcfs.FieldFilter("related_buildings", "array-contains", bid)
+                ).stream():
+                    data = c.to_dict() or {}
+                    related = [x for x in (data.get("related_buildings") or []) if x != bid]
+                    c.reference.update({"related_buildings": related, "updated_at": gcfs.SERVER_TIMESTAMP})
+                    cascade["contact_links"] += 1
+            except Exception:
+                log.exception("bulk_delete contact link cascade failed bid=%s", bid)
+            snap.reference.delete()
+            cascade["buildings"] += 1
+        except Exception as e:
+            log.exception("bulk_delete building failed bid=%s", bid)
+            errors.append({"id": bid, "error": str(e)[:200]})
+    return {"ok": True, "deleted": cascade["buildings"], "cascade": cascade, "errors": errors}
 
 
 @app.post("/api/contacts/bulk-delete")
@@ -933,26 +953,35 @@ def bulk_delete_contacts(
 ) -> dict[str, Any]:
     ids = [str(x) for x in (payload.get("ids") or []) if x]
     if not ids:
-        return {"ok": True, "deleted": 0, "cascade": {}}
+        return {"ok": True, "deleted": 0, "cascade": {}, "errors": []}
     db = get_db()
     cascade = {"contacts": 0, "deal_links": 0}
+    errors: list[dict[str, str]] = []
     for cid in ids:
-        snap = db.collection("contacts").document(cid).get()
-        if not snap.exists:
-            continue
-        owner = (snap.to_dict() or {}).get("owner_uid")
-        if owner and not _can_access(user["uid"], owner):
-            continue
-        for d in db.collection("deals").where(
-            filter=gcfs.FieldFilter("contact_ids", "array-contains", cid)
-        ).stream():
-            data = d.to_dict() or {}
-            cids = [x for x in (data.get("contact_ids") or []) if x != cid]
-            d.reference.update({"contact_ids": cids, "updated_at": gcfs.SERVER_TIMESTAMP})
-            cascade["deal_links"] += 1
-        snap.reference.delete()
-        cascade["contacts"] += 1
-    return {"ok": True, "deleted": cascade["contacts"], "cascade": cascade}
+        try:
+            snap = db.collection("contacts").document(cid).get()
+            if not snap.exists:
+                continue
+            owner = (snap.to_dict() or {}).get("owner_uid")
+            if owner and not _can_access(user["uid"], owner):
+                errors.append({"id": cid, "error": "not_authorized"})
+                continue
+            try:
+                for d in db.collection("deals").where(
+                    filter=gcfs.FieldFilter("contact_ids", "array-contains", cid)
+                ).stream():
+                    data = d.to_dict() or {}
+                    cids = [x for x in (data.get("contact_ids") or []) if x != cid]
+                    d.reference.update({"contact_ids": cids, "updated_at": gcfs.SERVER_TIMESTAMP})
+                    cascade["deal_links"] += 1
+            except Exception:
+                log.exception("bulk_delete contact deal-links cascade failed cid=%s", cid)
+            snap.reference.delete()
+            cascade["contacts"] += 1
+        except Exception as e:
+            log.exception("bulk_delete contact failed cid=%s", cid)
+            errors.append({"id": cid, "error": str(e)[:200]})
+    return {"ok": True, "deleted": cascade["contacts"], "cascade": cascade, "errors": errors}
 
 
 @app.post("/api/deals/purge")

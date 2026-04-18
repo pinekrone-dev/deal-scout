@@ -13,6 +13,7 @@ import {
   updateDoc,
   where
 } from 'firebase/firestore';
+import { arrayRemove, arrayUnion } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { useAuth } from '../lib/auth';
 import { useWorkspace } from '../lib/workspace';
@@ -33,6 +34,7 @@ export default function BuildingDetailPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [missing, setMissing] = useState(false);
   const [contacts, setContacts] = useState<(Contact & { id: string })[]>([]);
+  const [allContacts, setAllContacts] = useState<(Contact & { id: string })[]>([]);
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
@@ -90,6 +92,35 @@ export default function BuildingDetailPage() {
     });
     return () => unsub();
   }, [id, user, buildingOwnerUid]);
+
+  // All contacts in the workspace so the "Assign contact" picker has options.
+  useEffect(() => {
+    if (!user || !buildingOwnerUid) return;
+    const q = query(collection(db, 'contacts'), where('owner_uid', '==', buildingOwnerUid));
+    const unsub = onSnapshot(q, (snap) => {
+      const out: (Contact & { id: string })[] = [];
+      snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Contact) }));
+      out.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+      setAllContacts(out);
+    });
+    return () => unsub();
+  }, [user, buildingOwnerUid]);
+
+  async function linkContact(contactId: string) {
+    if (!id) return;
+    await updateDoc(doc(db, 'contacts', contactId), {
+      related_buildings: arrayUnion(id),
+      updated_at: Timestamp.now(),
+    });
+  }
+
+  async function unlinkContact(contactId: string) {
+    if (!id) return;
+    await updateDoc(doc(db, 'contacts', contactId), {
+      related_buildings: arrayRemove(id),
+      updated_at: Timestamp.now(),
+    });
+  }
 
   async function patchBuilding(p: Partial<Building>) {
     if (!id) return;
@@ -190,7 +221,14 @@ export default function BuildingDetailPage() {
 
       {tab === 'documents' ? <DocumentsTab building={building} /> : null}
 
-      {tab === 'contacts' ? <ContactsTab contacts={contacts} /> : null}
+      {tab === 'contacts' ? (
+        <ContactsTab
+          contacts={contacts}
+          allContacts={allContacts}
+          onLink={linkContact}
+          onUnlink={unlinkContact}
+        />
+      ) : null}
     </div>
   );
 }
@@ -385,36 +423,110 @@ function DocumentsTab({ building }: { building: Building }) {
   );
 }
 
-function ContactsTab({ contacts }: { contacts: (Contact & { id: string })[] }) {
+function ContactsTab({
+  contacts,
+  allContacts,
+  onLink,
+  onUnlink,
+}: {
+  contacts: (Contact & { id: string })[];
+  allContacts: (Contact & { id: string })[];
+  onLink: (contactId: string) => Promise<void>;
+  onUnlink: (contactId: string) => Promise<void>;
+}) {
+  const [picked, setPicked] = useState('');
+  const [busy, setBusy] = useState(false);
+  const linkedIds = new Set(contacts.map((c) => c.id));
+  const available = allContacts.filter((c) => !linkedIds.has(c.id));
+
+  async function assign() {
+    if (!picked) return;
+    setBusy(true);
+    try {
+      await onLink(picked);
+      setPicked('');
+    } catch (e) {
+      alert(`Assign failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function remove(contactId: string, name: string) {
+    if (!window.confirm(`Unlink "${name || 'this contact'}" from this building?`)) return;
+    setBusy(true);
+    try {
+      await onUnlink(contactId);
+    } catch (e) {
+      alert(`Unlink failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
-    <div className="card overflow-x-auto">
-      <table className="w-full">
-        <thead>
-          <tr>
-            <th className="th">Name</th>
-            <th className="th">Role</th>
-            <th className="th">Firm</th>
-            <th className="th">Email</th>
-            <th className="th">Phone</th>
-          </tr>
-        </thead>
-        <tbody>
-          {contacts.map((c) => (
-            <tr key={c.id} className="hover:bg-ink-50">
-              <td className="td">
-                <Link to={`/contacts/${c.id}`} className="text-accent-600 hover:underline">{c.name}</Link>
-              </td>
-              <td className="td"><span className="pill">{c.role}</span></td>
-              <td className="td">{c.firm ?? ''}</td>
-              <td className="td">{c.email ?? ''}</td>
-              <td className="td">{c.phone ?? ''}</td>
-            </tr>
+    <div className="space-y-3">
+      <div className="card p-3 flex flex-wrap items-center gap-2">
+        <label className="text-sm text-ink-600">Assign contact:</label>
+        <select
+          className="field max-w-sm"
+          value={picked}
+          onChange={(e) => setPicked(e.target.value)}
+          disabled={busy || available.length === 0}
+        >
+          <option value="">{available.length === 0 ? 'All contacts already linked' : 'Pick a contact...'}</option>
+          {available.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name || '(unnamed)'}{c.firm ? ` — ${c.firm}` : ''}{c.role ? ` [${c.role}]` : ''}
+            </option>
           ))}
-          {contacts.length === 0 ? (
-            <tr><td colSpan={5} className="td text-center text-ink-500 py-6">No linked contacts yet.</td></tr>
-          ) : null}
-        </tbody>
-      </table>
+        </select>
+        <button className="btn-primary" onClick={assign} disabled={!picked || busy}>
+          {busy ? 'Linking...' : 'Link to building'}
+        </button>
+        <div className="flex-1" />
+        <Link to="/contacts" className="text-xs text-accent-600 hover:underline">Manage contacts</Link>
+      </div>
+
+      <div className="card overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr>
+              <th className="th">Name</th>
+              <th className="th">Role</th>
+              <th className="th">Firm</th>
+              <th className="th">Email</th>
+              <th className="th">Phone</th>
+              <th className="th"></th>
+            </tr>
+          </thead>
+          <tbody>
+            {contacts.map((c) => (
+              <tr key={c.id} className="hover:bg-ink-50">
+                <td className="td">
+                  <Link to={`/contacts/${c.id}`} className="text-accent-600 hover:underline">{c.name}</Link>
+                </td>
+                <td className="td"><span className="pill">{c.role}</span></td>
+                <td className="td">{c.firm ?? ''}</td>
+                <td className="td">{c.email ?? ''}</td>
+                <td className="td">{c.phone ?? ''}</td>
+                <td className="td text-right">
+                  <button
+                    className="btn-ghost text-xs text-red-600"
+                    onClick={() => remove(c.id, c.name || '')}
+                    disabled={busy}
+                  >
+                    Unlink
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {contacts.length === 0 ? (
+              <tr><td colSpan={6} className="td text-center text-ink-500 py-6">No linked contacts yet. Use the picker above.</td></tr>
+            ) : null}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../lib/auth';
+import { useWorkspace } from '../lib/workspace';
 
 const linkCls = ({ isActive }: { isActive: boolean }) =>
   `px-3 py-1.5 rounded text-sm font-medium ${
@@ -8,6 +9,8 @@ const linkCls = ({ isActive }: { isActive: boolean }) =>
 
 export default function Shell() {
   const { user, signOut } = useAuth();
+  const { workspaces, current, select } = useWorkspace();
+  const showSwitcher = workspaces.length > 1;
   return (
     <div className="min-h-screen flex flex-col">
       <header className="border-b border-ink-200 bg-white">
@@ -24,6 +27,20 @@ export default function Shell() {
             <NavLink to="/settings" className={linkCls}>Settings</NavLink>
           </nav>
           <div className="flex items-center gap-3 text-sm">
+            {showSwitcher ? (
+              <select
+                className="field text-xs py-1 px-2 max-w-[220px]"
+                value={current?.owner_uid ?? ''}
+                onChange={(e) => select(e.target.value)}
+                title="Switch workspace"
+              >
+                {workspaces.map((w) => (
+                  <option key={w.owner_uid} value={w.owner_uid}>
+                    {w.role === 'owner' ? 'My deals' : `Shared: ${w.owner_email || w.owner_uid.slice(0, 6)}`}
+                  </option>
+                ))}
+              </select>
+            ) : null}
             <span className="text-ink-500 hidden md:inline">{user?.email}</span>
             <button className="btn-ghost" onClick={() => signOut()}>Sign out</button>
           </div>

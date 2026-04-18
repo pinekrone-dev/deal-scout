@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { addDoc, collection, onSnapshot, query, Timestamp, where } from 'firebase/firestore';
+import { addDoc, collection, deleteDoc, doc, onSnapshot, query, Timestamp, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { apiFetch } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -101,16 +101,40 @@ export default function ContactsPage() {
         : `Delete ${selCount} selected contacts and unlink from deals? This cannot be undone.`;
     if (!window.confirm(msg)) return;
     setBulkBusy(true);
+    const ids = [...selectedIds];
     try {
-      const res = await apiFetch('/api/contacts/bulk-delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ids: selectedIds }),
-      });
-      if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+      const res = await apiFetch(
+        '/api/contacts/bulk-delete',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ids }),
+        },
+        30_000
+      );
+      if (!res.ok) {
+        const body = await res.text().catch(() => '');
+        throw new Error(`${res.status} ${body || res.statusText}`);
+      }
+      const data = await res.json().catch(() => ({} as any));
       setSelected({});
+      if (Array.isArray(data?.errors) && data.errors.length > 0) {
+        alert(`Deleted ${data.deleted ?? 0}; ${data.errors.length} failed. See console for details.`);
+        // eslint-disable-next-line no-console
+        console.warn('bulk-delete partial errors', data.errors);
+      }
     } catch (e) {
-      alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+      // eslint-disable-next-line no-console
+      console.warn('bulk-delete API failed, falling back to client-side', e);
+      try {
+        await Promise.allSettled(ids.map((id) => deleteDoc(doc(db, 'contacts', id))));
+        setSelected({});
+        alert(
+          `Server cleanup failed (${e instanceof Error ? e.message : String(e)}). Deleted ${ids.length} contact docs directly; deal links were not unlinked. Ask to rerun server cleanup if needed.`
+        );
+      } catch (e2) {
+        alert(`Delete failed: ${e2 instanceof Error ? e2.message : String(e2)}`);
+      }
     } finally {
       setBulkBusy(false);
     }
