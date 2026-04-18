@@ -48,6 +48,26 @@ function emptyUnderwriting(b: BRow): Underwriting {
   };
 }
 
+// Merge a loaded doc on top of safe defaults so missing fields never crash the panel.
+function hydrate(b: BRow, data: Partial<Underwriting> & { id?: string }): Underwriting {
+  const base = emptyUnderwriting(b);
+  return {
+    ...base,
+    ...data,
+    ttm: data.ttm ? { ...base.ttm, ...data.ttm } : base.ttm,
+    proforma_12mo: data.proforma_12mo
+      ? { ...base.proforma_12mo, ...data.proforma_12mo }
+      : base.proforma_12mo,
+    assumptions: { ...base.assumptions, ...(data.assumptions || {}) },
+    rent_roll: data.rent_roll ?? base.rent_roll,
+    lease_roll: data.lease_roll ?? base.lease_roll,
+    returns: { ...base.returns, ...(data.returns || {}) },
+    version: data.version ?? base.version,
+    building_id: b.id,
+    asset_class: b.asset_class,
+  };
+}
+
 export default function UnderwritingPage() {
   const { user } = useAuth();
   const { currentOwnerUid, current } = useWorkspace();
@@ -83,9 +103,18 @@ export default function UnderwritingPage() {
   }, [buildings, selectedId]);
 
   // When selection changes, load its underwriting doc (live).
+  // We wait until the selected building is actually present in state so we have
+  // an asset_class to hydrate defaults against.
   useEffect(() => {
     if (!selectedId) {
       setUw(null);
+      return;
+    }
+    const b = buildings.find((x) => x.id === selectedId);
+    if (!b) {
+      // Buildings list hasn't populated yet (e.g. deep-linked URL). Stay in
+      // loading state; this effect re-runs once `buildings` fills in.
+      setLoadingUw(true);
       return;
     }
     setLoadingUw(true);
@@ -97,20 +126,17 @@ export default function UnderwritingPage() {
       q,
       (snap) => {
         if (snap.empty) {
-          const b = buildings.find((x) => x.id === selectedId);
-          setUw(b ? emptyUnderwriting(b) : null);
+          setUw(emptyUnderwriting(b));
         } else {
           const first = snap.docs[0];
-          setUw({ id: first.id, ...(first.data() as Omit<Underwriting, 'id'>) });
+          setUw(hydrate(b, { id: first.id, ...(first.data() as Partial<Underwriting>) }));
         }
         setLoadingUw(false);
       },
       (err) => {
         // eslint-disable-next-line no-console
         console.error('underwriting onSnapshot failed', err);
-        // Fall back to an empty model so the user can at least start editing.
-        const b = buildings.find((x) => x.id === selectedId);
-        setUw(b ? emptyUnderwriting(b) : null);
+        setUw(emptyUnderwriting(b));
         setLoadingUw(false);
       }
     );
@@ -247,16 +273,16 @@ export default function UnderwritingPage() {
         <section className="col-span-12 md:col-span-9">
           {!selected ? (
             <div className="card p-8 text-center text-ink-500">
-              {buildings.length === 0
+              {buildings.length === 0 && !user
+                ? 'Loading...'
+                : buildings.length === 0
                 ? 'No properties in this workspace yet. Add one from the Buildings tab.'
+                : selectedId
+                ? 'Loading model...'
                 : 'Select a property from the list to underwrite it.'}
             </div>
-          ) : loadingUw && !uw ? (
-            <div className="card p-8 text-center text-ink-500">Loading model...</div>
           ) : !uw ? (
-            <div className="card p-8 text-center text-ink-500">
-              Could not load underwriting for this property. Try another property or reload.
-            </div>
+            <div className="card p-8 text-center text-ink-500">Loading model...</div>
           ) : (
             <div className="space-y-4">
               <div className="card p-3 flex items-center justify-between">

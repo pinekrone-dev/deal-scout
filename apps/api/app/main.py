@@ -563,6 +563,109 @@ def _send_invite_email(to_email: str, accept_url: str, inviter: str, workspace_n
         return False
 
 
+@app.get("/api/workspace/diagnose")
+def diagnose_workspace(user: dict = Depends(require_user)) -> dict[str, Any]:
+    """Return everything we know about this user's workspace wiring so
+    sharing issues can be debugged. Returns: the caller's uid+email, their
+    own data counts, every workspace_members row they appear in (as member
+    OR owner), invites addressed to them, and for each membership a count
+    of the shared workspace's buildings/contacts."""
+    db = get_db()
+    uid = user["uid"]
+    email = (user.get("email") or "").lower()
+
+    def count(coll: str, owner: str) -> int:
+        try:
+            return sum(
+                1
+                for _ in db.collection(coll)
+                .where(filter=gcfs.FieldFilter("owner_uid", "==", owner))
+                .stream()
+            )
+        except Exception:
+            log.exception("diagnose count failed coll=%s owner=%s", coll, owner)
+            return -1
+
+    own_snap = db.collection("users").document(uid).get()
+    own_profile = own_snap.to_dict() if own_snap.exists else {}
+
+    memberships_as_member: list[dict[str, Any]] = []
+    try:
+        for m in (
+            db.collection("workspace_members")
+            .where(filter=gcfs.FieldFilter("member_uid", "==", uid))
+            .stream()
+        ):
+            d = m.to_dict() or {}
+            owner_uid = d.get("owner_uid")
+            owner_email = None
+            if owner_uid:
+                os_ = db.collection("users").document(owner_uid).get()
+                owner_email = (os_.to_dict() or {}).get("email") if os_.exists else None
+            memberships_as_member.append({
+                "doc_id": m.id,
+                "owner_uid": owner_uid,
+                "owner_email": owner_email,
+                "role": d.get("role"),
+                "buildings_in_workspace": count("buildings", owner_uid) if owner_uid else None,
+                "contacts_in_workspace": count("contacts", owner_uid) if owner_uid else None,
+            })
+    except Exception:
+        log.exception("diagnose memberships-as-member failed uid=%s", uid)
+
+    memberships_as_owner: list[dict[str, Any]] = []
+    try:
+        for m in (
+            db.collection("workspace_members")
+            .where(filter=gcfs.FieldFilter("owner_uid", "==", uid))
+            .stream()
+        ):
+            d = m.to_dict() or {}
+            memberships_as_owner.append({
+                "doc_id": m.id,
+                "member_uid": d.get("member_uid"),
+                "member_email": d.get("email"),
+                "role": d.get("role"),
+            })
+    except Exception:
+        log.exception("diagnose memberships-as-owner failed uid=%s", uid)
+
+    invites_to_me: list[dict[str, Any]] = []
+    if email:
+        try:
+            for iv in (
+                db.collection("invites")
+                .where(filter=gcfs.FieldFilter("email", "==", email))
+                .stream()
+            ):
+                d = iv.to_dict() or {}
+                invites_to_me.append({
+                    "token": iv.id,
+                    "owner_uid": d.get("owner_uid"),
+                    "inviter_email": d.get("inviter_email"),
+                    "accepted": bool(d.get("accepted")),
+                    "created_at": d.get("created_at"),
+                })
+        except Exception:
+            log.exception("diagnose invites lookup failed email=%s", email)
+
+    return {
+        "uid": uid,
+        "email": email,
+        "profile": {
+            "email": (own_profile or {}).get("email"),
+            "workspace_owner_uid": (own_profile or {}).get("workspace_owner_uid"),
+        },
+        "own_data": {
+            "buildings": count("buildings", uid),
+            "contacts": count("contacts", uid),
+        },
+        "memberships_as_member": memberships_as_member,
+        "memberships_as_owner": memberships_as_owner,
+        "invites_to_me": invites_to_me,
+    }
+
+
 @app.get("/api/workspace/list")
 def list_my_workspaces(user: dict = Depends(require_user)) -> dict[str, Any]:
     """List every workspace the caller can access.
