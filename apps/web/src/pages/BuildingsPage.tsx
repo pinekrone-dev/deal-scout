@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { addDoc, collection, onSnapshot, orderBy, query, Timestamp, where } from 'firebase/firestore';
+import { addDoc, collection, deleteDoc, doc, onSnapshot, query, Timestamp, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
-import { uploadOM } from '../lib/api';
+import { apiFetch, uploadOM } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { useWorkspace } from '../lib/workspace';
 import type { Building, AssetClass } from '../types';
 import { ASSET_CLASSES } from '../types';
 import { fmtNum, fmtPct, fmtUSD } from '../lib/format';
@@ -12,18 +13,18 @@ type Row = Building & { id: string };
 
 export default function BuildingsPage() {
   const { user } = useAuth();
+  const { currentOwnerUid, current } = useWorkspace();
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState('');
   const [assetFilter, setAssetFilter] = useState<AssetClass | ''>('');
   const [uploading, setUploading] = useState(false);
+  const [deleting, setDeleting] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const nav = useNavigate();
 
   useEffect(() => {
-    if (!user) return;
-    // No orderBy here — that would require a composite index when combined with
-    // the owner_uid filter. Sort client-side instead.
-    const q = query(collection(db, 'buildings'), where('owner_uid', '==', user.uid));
+    if (!user || !currentOwnerUid) return;
+    const q = query(collection(db, 'buildings'), where('owner_uid', '==', currentOwnerUid));
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -42,7 +43,7 @@ export default function BuildingsPage() {
       }
     );
     return () => unsub();
-  }, [user]);
+  }, [user, currentOwnerUid]);
 
   const filtered = useMemo(() => {
     const f = filter.toLowerCase();
@@ -59,7 +60,7 @@ export default function BuildingsPage() {
   }, [rows, filter, assetFilter]);
 
   async function createBlank() {
-    if (!user) return;
+    if (!user || !currentOwnerUid) return;
     const now = Date.now();
     const payload: Building = {
       address: 'New Building',
@@ -69,7 +70,7 @@ export default function BuildingsPage() {
     };
     const ref = await addDoc(collection(db, 'buildings'), {
       ...payload,
-      owner_uid: user.uid,
+      owner_uid: currentOwnerUid,
       created_at: Timestamp.fromMillis(now),
       updated_at: Timestamp.fromMillis(now)
     });
@@ -80,7 +81,7 @@ export default function BuildingsPage() {
     if (!files || files.length === 0) return;
     setUploading(true);
     try {
-      const { ingestion_id } = await uploadOM(Array.from(files));
+      const { ingestion_id } = await uploadOM(Array.from(files), currentOwnerUid ?? undefined);
       nav(`/ingest/${ingestion_id}`);
     } catch (e) {
       alert(`Upload failed: ${e instanceof Error ? e.message : String(e)}`);
@@ -90,12 +91,41 @@ export default function BuildingsPage() {
     }
   }
 
+  async function removeBuilding(id: string, address: string) {
+    if (!window.confirm(`Delete "${address || 'this building'}" and all of its underwriting, deals, and OM files? This cannot be undone.`)) {
+      return;
+    }
+    setDeleting(id);
+    try {
+      // Prefer API endpoint for proper cascade. Fall back to Firestore delete if API fails.
+      const res = await apiFetch(`/api/buildings/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const text = await res.text();
+        if (res.status === 404 || res.status === 405) {
+          // API doesn't have the endpoint yet — fall back to direct delete.
+          await deleteDoc(doc(db, 'buildings', id));
+        } else {
+          throw new Error(`${res.status} ${text}`);
+        }
+      }
+    } catch (e) {
+      alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(null);
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-semibold">Buildings</h1>
-          <p className="text-sm text-ink-500">{rows.length} total</p>
+          <p className="text-sm text-ink-500">
+            {rows.length} total
+            {current && current.role !== 'owner' ? (
+              <span className="ml-2 pill">Shared: {current.owner_email}</span>
+            ) : null}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <input
@@ -147,6 +177,7 @@ export default function BuildingsPage() {
               <th className="th text-right">Asking</th>
               <th className="th text-right">Cap</th>
               <th className="th text-right">Occ</th>
+              <th className="th"></th>
             </tr>
           </thead>
           <tbody>
@@ -169,10 +200,20 @@ export default function BuildingsPage() {
                 <td className="td num">{fmtUSD(r.asking_price ?? null)}</td>
                 <td className="td num">{fmtPct(r.cap_rate ?? null)}</td>
                 <td className="td num">{fmtPct(r.occupancy ?? null, 1)}</td>
+                <td className="td text-right">
+                  <button
+                    className="btn-ghost text-xs text-red-600"
+                    onClick={() => removeBuilding(r.id, r.address || '')}
+                    disabled={deleting === r.id}
+                    title="Delete building"
+                  >
+                    {deleting === r.id ? '...' : 'Delete'}
+                  </button>
+                </td>
               </tr>
             ))}
             {filtered.length === 0 ? (
-              <tr><td colSpan={7} className="td text-center text-ink-500 py-8">No buildings yet.</td></tr>
+              <tr><td colSpan={8} className="td text-center text-ink-500 py-8">No buildings yet.</td></tr>
             ) : null}
           </tbody>
         </table>

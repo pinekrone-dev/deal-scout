@@ -3,6 +3,8 @@ import type { Assumptions, Building, LineItem, Statement, Underwriting } from '.
 import { fmtPct, fmtUSD, parseNum } from '../lib/format';
 import { buildProformaFromTtm, computeNoi, computeReturns } from '../underwriting/engine';
 
+type UwTab = 'financials' | 'assumptions' | 'rent-roll' | 'lease-roll';
+
 export default function UnderwritingPanel({
   building,
   initial,
@@ -18,6 +20,7 @@ export default function UnderwritingPanel({
   const [leaseRoll, setLeaseRoll] = useState(initial.lease_roll ?? []);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [tab, setTab] = useState<UwTab>('financials');
 
   useEffect(() => {
     setTtm(initial.ttm);
@@ -27,14 +30,15 @@ export default function UnderwritingPanel({
     setDirty(false);
   }, [initial]);
 
+  // All derived values recompute live as inputs change.
   const proforma = useMemo(() => buildProformaFromTtm(ttm, assumptions), [ttm, assumptions]);
   const returns = useMemo(
     () => computeReturns(building, ttm, proforma, assumptions),
     [building, ttm, proforma, assumptions]
   );
 
-  const ttmNoi = computeNoi(ttm);
-  const proformaNoi = computeNoi(proforma);
+  const ttmNoi = useMemo(() => computeNoi(ttm), [ttm]);
+  const proformaNoi = useMemo(() => computeNoi(proforma), [proforma]);
 
   function updateItem(scope: 'revenue' | 'expenses', idx: number, patch: Partial<LineItem>) {
     setTtm((s) => {
@@ -87,6 +91,13 @@ export default function UnderwritingPanel({
   const showLeaseRoll = ['office', 'retail', 'industrial', 'mixed-use'].includes(ac);
   const isLand = ac === 'land';
 
+  const tabs: { id: UwTab; label: string; show: boolean }[] = [
+    { id: 'financials', label: 'Financials', show: true },
+    { id: 'assumptions', label: 'Assumptions', show: !isLand },
+    { id: 'rent-roll', label: 'Rent Roll', show: showRentRoll },
+    { id: 'lease-roll', label: 'Lease Roll', show: showLeaseRoll }
+  ];
+
   return (
     <div className="space-y-4">
       {isLand ? (
@@ -98,13 +109,36 @@ export default function UnderwritingPanel({
         </div>
       ) : null}
 
-      <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
-        <div className="card p-3 xl:col-span-2">
-          <div className="flex items-center justify-between mb-2">
-            <div className="font-semibold">TTM and 12-Month Proforma</div>
-            <div className="text-xs text-ink-500">NOI TTM {fmtUSD(ttmNoi)} / Proforma {fmtUSD(proformaNoi)}</div>
-          </div>
+      {/* Live returns panel is always visible so Kevin can see the effect of any input change at a glance. */}
+      <div className="card p-3">
+        <div className="flex items-center justify-between mb-2">
+          <div className="font-semibold">Returns <span className="text-xs text-ink-500 font-normal">(live)</span></div>
+          <div className="text-xs text-ink-500">NOI TTM {fmtUSD(ttmNoi)} / Proforma {fmtUSD(proformaNoi)}</div>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <Metric label="Levered IRR" value={returns.irr !== null ? fmtPct(returns.irr) : '-'} />
+          <Metric label="Equity Multiple" value={returns.equity_multiple !== null ? `${returns.equity_multiple.toFixed(2)}x` : '-'} />
+          <Metric label="CoC Year 1" value={returns.coc_yr1 !== null ? fmtPct(returns.coc_yr1) : '-'} />
+          <Metric label="DSCR" value={returns.dscr !== null ? returns.dscr.toFixed(2) : '-'} />
+        </div>
+      </div>
 
+      <div className="flex items-center gap-1 border-b border-ink-200">
+        {tabs.filter((t) => t.show).map((t) => (
+          <button
+            key={t.id}
+            onClick={() => setTab(t.id)}
+            className={`px-3 py-2 text-sm font-medium border-b-2 ${
+              tab === t.id ? 'border-accent-600 text-ink-900' : 'border-transparent text-ink-500 hover:text-ink-800'
+            }`}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'financials' ? (
+        <div className="card p-3">
           <StatementTable
             ttm={ttm}
             proforma={proforma}
@@ -114,52 +148,17 @@ export default function UnderwritingPanel({
             onRemove={removeItem}
           />
         </div>
+      ) : null}
 
-        <div className="card p-3">
-          <div className="font-semibold mb-2">Assumptions</div>
-          <div className="grid grid-cols-2 gap-3">
-            <AssumptionField label="Rent Growth %" value={assumptions.rent_growth_pct * 100} onChange={(v) => updateAssumption('rent_growth_pct', v / 100)} />
-            <AssumptionField label="Vacancy %" value={assumptions.vacancy_pct * 100} onChange={(v) => updateAssumption('vacancy_pct', v / 100)} />
-            <AssumptionField label="Expense Growth %" value={assumptions.expense_growth_pct * 100} onChange={(v) => updateAssumption('expense_growth_pct', v / 100)} />
-            <AssumptionField label="Mgmt Fee %" value={assumptions.mgmt_fee_pct * 100} onChange={(v) => updateAssumption('mgmt_fee_pct', v / 100)} />
-            <AssumptionField
-              label={ac === 'hospitality' ? 'CapEx / key' : ac === 'multifamily' ? 'CapEx / unit' : 'CapEx reserve'}
-              value={assumptions.capex_reserve_per_unit}
-              onChange={(v) => updateAssumption('capex_reserve_per_unit', v)}
-              prefix="$"
-            />
-            {['office', 'retail', 'industrial', 'mixed-use'].includes(ac) ? (
-              <AssumptionField
-                label="TI / LC per SF"
-                value={assumptions.ti_lc_reserve_per_sf ?? 0}
-                onChange={(v) => updateAssumption('ti_lc_reserve_per_sf', v)}
-                prefix="$"
-              />
-            ) : null}
-            <AssumptionField label="Exit Cap %" value={assumptions.exit_cap * 100} onChange={(v) => updateAssumption('exit_cap', v / 100)} />
-            <AssumptionField label="Hold Years" value={assumptions.hold_years} onChange={(v) => updateAssumption('hold_years', Math.round(v))} />
-            <AssumptionField label="LTV %" value={assumptions.ltv * 100} onChange={(v) => updateAssumption('ltv', v / 100)} />
-            <AssumptionField label="Rate %" value={assumptions.rate * 100} onChange={(v) => updateAssumption('rate', v / 100)} />
-            <AssumptionField label="Amort Years" value={assumptions.amort_years ?? 30} onChange={(v) => updateAssumption('amort_years', Math.round(v))} />
-          </div>
-        </div>
-      </div>
+      {tab === 'assumptions' && !isLand ? (
+        <AssumptionsTab ac={ac} assumptions={assumptions} update={updateAssumption} />
+      ) : null}
 
-      <div className="card p-3">
-        <div className="font-semibold mb-2">Returns</div>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-          <Metric label="Levered IRR" value={returns.irr !== null ? fmtPct(returns.irr) : '-'} />
-          <Metric label="Equity Multiple" value={returns.equity_multiple !== null ? `${returns.equity_multiple.toFixed(2)}x` : '-'} />
-          <Metric label="CoC Year 1" value={returns.coc_yr1 !== null ? fmtPct(returns.coc_yr1) : '-'} />
-          <Metric label="DSCR" value={returns.dscr !== null ? returns.dscr.toFixed(2) : '-'} />
-        </div>
-      </div>
-
-      {showRentRoll ? (
+      {tab === 'rent-roll' && showRentRoll ? (
         <RentRollEditor rows={rentRoll} onChange={(r) => { setRentRoll(r); setDirty(true); }} />
       ) : null}
 
-      {showLeaseRoll ? (
+      {tab === 'lease-roll' && showLeaseRoll ? (
         <LeaseRollEditor rows={leaseRoll} onChange={(r) => { setLeaseRoll(r); setDirty(true); }} />
       ) : null}
 
@@ -168,6 +167,62 @@ export default function UnderwritingPanel({
           {saving ? 'Saving...' : dirty ? `Save as version ${initial.version + 1}` : 'Saved'}
         </button>
         <span className="text-xs text-ink-500">Current version: {initial.version}</span>
+      </div>
+    </div>
+  );
+}
+
+function AssumptionsTab({
+  ac,
+  assumptions,
+  update
+}: {
+  ac: Building['asset_class'];
+  assumptions: Assumptions;
+  update: <K extends keyof Assumptions>(key: K, value: Assumptions[K]) => void;
+}) {
+  return (
+    <div className="card p-4 space-y-4">
+      <div>
+        <h3 className="font-semibold">Growth & operations</h3>
+        <p className="text-xs text-ink-500">All numbers recompute the proforma and returns live.</p>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <AssumptionField label="Rent Growth %" value={assumptions.rent_growth_pct * 100} onChange={(v) => update('rent_growth_pct', v / 100)} />
+        <AssumptionField label="Vacancy %" value={assumptions.vacancy_pct * 100} onChange={(v) => update('vacancy_pct', v / 100)} />
+        <AssumptionField label="Expense Growth %" value={assumptions.expense_growth_pct * 100} onChange={(v) => update('expense_growth_pct', v / 100)} />
+        <AssumptionField label="Mgmt Fee %" value={assumptions.mgmt_fee_pct * 100} onChange={(v) => update('mgmt_fee_pct', v / 100)} />
+        <AssumptionField
+          label={ac === 'hospitality' ? 'CapEx / key' : ac === 'multifamily' ? 'CapEx / unit' : 'CapEx reserve'}
+          value={assumptions.capex_reserve_per_unit}
+          onChange={(v) => update('capex_reserve_per_unit', v)}
+          prefix="$"
+        />
+        {['office', 'retail', 'industrial', 'mixed-use'].includes(ac) ? (
+          <AssumptionField
+            label="TI / LC per SF"
+            value={assumptions.ti_lc_reserve_per_sf ?? 0}
+            onChange={(v) => update('ti_lc_reserve_per_sf', v)}
+            prefix="$"
+          />
+        ) : null}
+      </div>
+
+      <div>
+        <h3 className="font-semibold">Exit & hold</h3>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <AssumptionField label="Exit Cap %" value={assumptions.exit_cap * 100} onChange={(v) => update('exit_cap', v / 100)} />
+        <AssumptionField label="Hold Years" value={assumptions.hold_years} onChange={(v) => update('hold_years', Math.round(v))} />
+      </div>
+
+      <div>
+        <h3 className="font-semibold">Debt</h3>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+        <AssumptionField label="LTV %" value={assumptions.ltv * 100} onChange={(v) => update('ltv', v / 100)} />
+        <AssumptionField label="Rate %" value={assumptions.rate * 100} onChange={(v) => update('rate', v / 100)} />
+        <AssumptionField label="Amort Years" value={assumptions.amort_years ?? 30} onChange={(v) => update('amort_years', Math.round(v))} />
       </div>
     </div>
   );

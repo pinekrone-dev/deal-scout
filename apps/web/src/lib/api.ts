@@ -42,9 +42,10 @@ export async function apiJson<T>(path: string, init: RequestInit = {}, timeoutMs
   return (await res.json()) as T;
 }
 
-export async function uploadOM(files: File[]): Promise<{ ingestion_id: string }> {
+export async function uploadOM(files: File[], workspaceOwnerUid?: string): Promise<{ ingestion_id: string }> {
   const form = new FormData();
   for (const f of files) form.append('files', f, f.name);
+  if (workspaceOwnerUid) form.append('workspace_owner_uid', workspaceOwnerUid);
   const headers = await authHeaders();
   const url = apiBase ? `${apiBase.replace(/\/$/, '')}/api/ingest` : '/api/ingest';
   const { signal, cancel } = withTimeout(UPLOAD_TIMEOUT_MS);

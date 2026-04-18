@@ -5,7 +5,6 @@ import {
   collection,
   doc,
   onSnapshot,
-  orderBy,
   query,
   Timestamp,
   updateDoc,
@@ -13,6 +12,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { useAuth } from '../lib/auth';
+import { useWorkspace } from '../lib/workspace';
 import type { Building, Deal, DealStatus } from '../types';
 import { DEAL_STATUSES } from '../types';
 import { fmtUSD } from '../lib/format';
@@ -21,12 +21,13 @@ type DealRow = Deal & { id: string };
 
 export default function DealsPage() {
   const { user } = useAuth();
+  const { currentOwnerUid, current } = useWorkspace();
   const [deals, setDeals] = useState<DealRow[]>([]);
   const [buildings, setBuildings] = useState<Record<string, Building>>({});
 
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'deals'), where('owner_uid', '==', user.uid));
+    if (!user || !currentOwnerUid) return;
+    const q = query(collection(db, 'deals'), where('owner_uid', '==', currentOwnerUid));
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -45,18 +46,18 @@ export default function DealsPage() {
       }
     );
     return () => unsub();
-  }, [user]);
+  }, [user, currentOwnerUid]);
 
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'buildings'), where('owner_uid', '==', user.uid));
+    if (!user || !currentOwnerUid) return;
+    const q = query(collection(db, 'buildings'), where('owner_uid', '==', currentOwnerUid));
     const unsub = onSnapshot(q, (snap) => {
       const map: Record<string, Building> = {};
       snap.forEach((d) => (map[d.id] = d.data() as Building));
       setBuildings(map);
     });
     return () => unsub();
-  }, [user]);
+  }, [user, currentOwnerUid]);
 
   const byStatus = useMemo(() => {
     const out: Record<DealStatus, DealRow[]> = {
@@ -69,13 +70,13 @@ export default function DealsPage() {
   }, [deals]);
 
   async function addDeal(status: DealStatus) {
-    if (!user) return;
+    if (!user || !currentOwnerUid) return;
     const now = Date.now();
     await addDoc(collection(db, 'deals'), {
       building_id: '',
       contact_ids: [],
       status,
-      owner_uid: user.uid,
+      owner_uid: currentOwnerUid,
       created_at: Timestamp.fromMillis(now),
       updated_at: Timestamp.fromMillis(now)
     });
@@ -88,7 +89,14 @@ export default function DealsPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h1 className="text-xl font-semibold">Deals</h1>
+        <div>
+          <h1 className="text-xl font-semibold">Deals</h1>
+          {current && current.role !== 'owner' ? (
+            <p className="text-sm text-ink-500">
+              <span className="pill">Shared: {current.owner_email}</span>
+            </p>
+          ) : null}
+        </div>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
         {DEAL_STATUSES.map((s) => (

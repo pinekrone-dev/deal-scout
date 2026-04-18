@@ -6,6 +6,7 @@ import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
 import { db } from '../lib/firebase';
 import { useAuth } from '../lib/auth';
+import { useWorkspace } from '../lib/workspace';
 import type { Building } from '../types';
 import { fmtUSD } from '../lib/format';
 
@@ -57,12 +58,14 @@ function FitBounds({ points }: { points: Array<[number, number]> }) {
 
 export default function DashboardPage() {
   const { user } = useAuth();
+  const { workspaces, current, currentOwnerUid, select, loading: wsLoading } = useWorkspace();
   const [rows, setRows] = useState<Row[]>([]);
   const geocodingRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!user) return;
-    const q = query(collection(db, 'buildings'), where('owner_uid', '==', user.uid));
+    if (!user || !currentOwnerUid) return;
+    setRows([]); // clear when switching workspaces
+    const q = query(collection(db, 'buildings'), where('owner_uid', '==', currentOwnerUid));
     const unsub = onSnapshot(
       q,
       (snap) => {
@@ -76,7 +79,7 @@ export default function DashboardPage() {
       }
     );
     return () => unsub();
-  }, [user]);
+  }, [user, currentOwnerUid]);
 
   // Lazy geocode any building that has an address but no lat/lng.
   useEffect(() => {
@@ -121,14 +124,44 @@ export default function DashboardPage() {
   const defaultCenter: [number, number] = [33.98, -118.45]; // West LA-ish
   const center: [number, number] = points[0] ?? defaultCenter;
 
+  const showSwitcher = workspaces.length > 1;
+
   return (
     <div className="space-y-4">
+      {showSwitcher ? (
+        <div className="card p-2 flex flex-wrap items-center gap-2">
+          <span className="text-xs uppercase tracking-wide text-ink-500 px-2">Workspace:</span>
+          {workspaces.map((w) => (
+            <button
+              key={w.owner_uid}
+              className={`px-3 py-1.5 rounded text-sm font-medium border ${
+                w.owner_uid === currentOwnerUid
+                  ? 'bg-accent-600 text-white border-accent-600'
+                  : 'bg-white text-ink-700 border-ink-200 hover:bg-ink-50'
+              }`}
+              onClick={() => select(w.owner_uid)}
+            >
+              {w.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold">Dashboard</h1>
           <p className="text-sm text-ink-500">
-            {rows.length} building{rows.length === 1 ? '' : 's'} / {plotted.length} on map
-            {missingCoords > 0 ? <span className="text-ink-400"> &nbsp;({missingCoords} geocoding...)</span> : null}
+            {wsLoading ? (
+              'Loading workspace...'
+            ) : (
+              <>
+                {rows.length} building{rows.length === 1 ? '' : 's'} / {plotted.length} on map
+                {missingCoords > 0 ? <span className="text-ink-400"> &nbsp;({missingCoords} geocoding...)</span> : null}
+                {current && current.role !== 'owner' ? (
+                  <span className="ml-2 pill">Shared: {current.owner_email}</span>
+                ) : null}
+              </>
+            )}
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -170,7 +203,7 @@ export default function DashboardPage() {
         </MapContainer>
       </div>
 
-      {rows.length === 0 ? (
+      {rows.length === 0 && !wsLoading ? (
         <div className="card p-6 text-center text-sm text-ink-500">
           No buildings yet. Upload an OM on the Buildings tab or create one manually.
         </div>

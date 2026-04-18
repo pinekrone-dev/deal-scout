@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/auth';
+import { WorkspaceProvider } from './lib/workspace';
 import Shell from './components/Shell';
 import LoginPage from './pages/LoginPage';
 import DashboardPage from './pages/DashboardPage';
@@ -10,6 +11,7 @@ import ContactDetailPage from './pages/ContactDetailPage';
 import DealsPage from './pages/DealsPage';
 import IngestPage from './pages/IngestPage';
 import SettingsPage from './pages/SettingsPage';
+import InviteAcceptPage from './pages/InviteAcceptPage';
 import NotFoundPage from './pages/NotFoundPage';
 
 function Protected({ children }: { children: JSX.Element }) {
@@ -28,26 +30,29 @@ function Protected({ children }: { children: JSX.Element }) {
 export default function App() {
   return (
     <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route
-          element={
-            <Protected>
-              <Shell />
-            </Protected>
-          }
-        >
-          <Route index element={<DashboardPage />} />
-          <Route path="/buildings" element={<BuildingsPage />} />
-          <Route path="/buildings/:id" element={<BuildingDetailPage />} />
-          <Route path="/contacts" element={<ContactsPage />} />
-          <Route path="/contacts/:id" element={<ContactDetailPage />} />
-          <Route path="/deals" element={<DealsPage />} />
-          <Route path="/ingest/:ingestionId" element={<IngestPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-        </Route>
-        <Route path="*" element={<NotFoundPage />} />
-      </Routes>
+      <WorkspaceProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/invite/:token" element={<InviteAcceptPage />} />
+          <Route
+            element={
+              <Protected>
+                <Shell />
+              </Protected>
+            }
+          >
+            <Route index element={<DashboardPage />} />
+            <Route path="/buildings" element={<BuildingsPage />} />
+            <Route path="/buildings/:id" element={<BuildingDetailPage />} />
+            <Route path="/contacts" element={<ContactsPage />} />
+            <Route path="/contacts/:id" element={<ContactDetailPage />} />
+            <Route path="/deals" element={<DealsPage />} />
+            <Route path="/ingest/:ingestionId" element={<IngestPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Route>
+          <Route path="*" element={<NotFoundPage />} />
+        </Routes>
+      </WorkspaceProvider>
     </AuthProvider>
   );
 }

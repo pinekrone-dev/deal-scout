@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
   getDoc,
   onSnapshot,
-  orderBy,
   query,
   setDoc,
   Timestamp,
@@ -15,6 +15,8 @@ import {
 } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
 import { useAuth } from '../lib/auth';
+import { useWorkspace } from '../lib/workspace';
+import { apiFetch } from '../lib/api';
 import type { AssetClass, Building, Contact, Underwriting } from '../types';
 import { ASSET_CLASSES } from '../types';
 import UnderwritingPanel from '../components/UnderwritingPanel';
@@ -26,6 +28,8 @@ type Tab = 'overview' | 'underwriting' | 'documents' | 'contacts';
 export default function BuildingDetailPage() {
   const { id } = useParams<{ id: string }>();
   const { user } = useAuth();
+  const { currentOwnerUid } = useWorkspace();
+  const nav = useNavigate();
   const [tab, setTab] = useState<Tab>('overview');
   const [building, setBuilding] = useState<Building | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -33,13 +37,13 @@ export default function BuildingDetailPage() {
   const [underwriting, setUnderwriting] = useState<Underwriting | null>(null);
   const [uwLoading, setUwLoading] = useState(true);
   const [contacts, setContacts] = useState<(Contact & { id: string })[]>([]);
+  const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
     if (!id) return;
     setMissing(false);
     setLoadError(null);
     let settled = false;
-    // One-shot fetch so we get a definitive answer fast and can show a real error.
     (async () => {
       try {
         const snap = await getDoc(doc(db, 'buildings', id));
@@ -53,7 +57,6 @@ export default function BuildingDetailPage() {
         if (!settled) setLoadError(e instanceof Error ? e.message : String(e));
       }
     })();
-    // Live listener keeps it in sync after the first fetch.
     const unsub = onSnapshot(
       doc(db, 'buildings', id),
       (snap) => {
@@ -73,18 +76,21 @@ export default function BuildingDetailPage() {
     return () => { settled = true; unsub(); };
   }, [id]);
 
+  // Underwriting docs are owned by the building's owner_uid (the workspace),
+  // so query by the building's owner to support members reading a shared workspace.
+  const buildingOwnerUid = building?.owner_uid ?? currentOwnerUid ?? null;
+
   useEffect(() => {
-    if (!id || !user) return;
+    if (!id || !user || !buildingOwnerUid) return;
     const q = query(
       collection(db, 'underwriting'),
-      where('owner_uid', '==', user.uid),
+      where('owner_uid', '==', buildingOwnerUid),
       where('building_id', '==', id)
     );
     const unsub = onSnapshot(
       q,
       (snap) => {
         if (!snap.empty) {
-          // Pick the highest-version doc client-side.
           let best: Underwriting | null = null;
           let bestV = -1;
           snap.forEach((d) => {
@@ -108,13 +114,13 @@ export default function BuildingDetailPage() {
       }
     );
     return () => unsub();
-  }, [id, user]);
+  }, [id, user, buildingOwnerUid]);
 
   useEffect(() => {
-    if (!id || !user) return;
+    if (!id || !user || !buildingOwnerUid) return;
     const q = query(
       collection(db, 'contacts'),
-      where('owner_uid', '==', user.uid),
+      where('owner_uid', '==', buildingOwnerUid),
       where('related_buildings', 'array-contains', id)
     );
     const unsub = onSnapshot(q, (snap) => {
@@ -123,7 +129,7 @@ export default function BuildingDetailPage() {
       setContacts(out);
     });
     return () => unsub();
-  }, [id, user]);
+  }, [id, user, buildingOwnerUid]);
 
   async function patchBuilding(p: Partial<Building>) {
     if (!id) return;
@@ -131,30 +137,53 @@ export default function BuildingDetailPage() {
   }
 
   async function createInitialUnderwriting() {
-    if (!id || !building || !user) return;
+    if (!id || !building || !user || !buildingOwnerUid) return;
     const uw = blankUnderwriting({ ...building, id });
     const ref = await addDoc(collection(db, 'underwriting'), {
       ...uw,
-      owner_uid: user.uid,
+      owner_uid: buildingOwnerUid,
       created_at: Timestamp.fromMillis(Date.now())
     });
     setUnderwriting({ ...uw, id: ref.id });
   }
 
   async function saveNewVersion(uw: Underwriting) {
-    if (!id || !user) return;
+    if (!id || !user || !buildingOwnerUid) return;
     const nextVersion = (underwriting?.version ?? 0) + 1;
     const payload = { ...uw, version: nextVersion, building_id: id };
     await setDoc(doc(collection(db, 'underwriting')), {
       ...payload,
-      owner_uid: user.uid,
+      owner_uid: buildingOwnerUid,
       created_at: Timestamp.fromMillis(Date.now())
     });
-    // Also update building-level rollup
     await patchBuilding({
       current_noi: uw.ttm.noi,
       cap_rate: building?.asking_price ? uw.ttm.noi / building.asking_price : undefined
     });
+  }
+
+  async function deleteBuilding() {
+    if (!id) return;
+    if (!window.confirm(`Delete "${building?.address || 'this building'}" and all related underwriting, deals, and OM files? This cannot be undone.`)) {
+      return;
+    }
+    setDeleting(true);
+    try {
+      const res = await apiFetch(`/api/buildings/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const text = await res.text();
+        if (res.status === 404 || res.status === 405) {
+          await deleteDoc(doc(db, 'buildings', id));
+        } else {
+          throw new Error(`${res.status} ${text}`);
+        }
+      }
+      nav('/buildings');
+    } catch (e) {
+      alert(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setDeleting(false);
+    }
   }
 
   if (loadError) {
@@ -198,6 +227,14 @@ export default function BuildingDetailPage() {
           <span className="pill">{building.asset_class}</span>
           <span className="pill">NOI {fmtUSD(building.current_noi ?? null)}</span>
           <span className="pill">Cap {fmtPct(building.cap_rate ?? null)}</span>
+          <button
+            className="btn-ghost text-xs text-red-600"
+            onClick={deleteBuilding}
+            disabled={deleting}
+            title="Delete this building"
+          >
+            {deleting ? 'Deleting...' : 'Delete'}
+          </button>
         </div>
       </div>
 
