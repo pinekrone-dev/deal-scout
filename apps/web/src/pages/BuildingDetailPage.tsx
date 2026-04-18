@@ -14,6 +14,7 @@ import {
   where
 } from 'firebase/firestore';
 import { db, auth } from '../lib/firebase';
+import { useAuth } from '../lib/auth';
 import type { AssetClass, Building, Contact, Underwriting } from '../types';
 import { ASSET_CLASSES } from '../types';
 import UnderwritingPanel from '../components/UnderwritingPanel';
@@ -24,6 +25,7 @@ type Tab = 'overview' | 'underwriting' | 'documents' | 'contacts';
 
 export default function BuildingDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { user } = useAuth();
   const [tab, setTab] = useState<Tab>('overview');
   const [building, setBuilding] = useState<Building | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -72,9 +74,10 @@ export default function BuildingDetailPage() {
   }, [id]);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !user) return;
     const q = query(
       collection(db, 'underwriting'),
+      where('owner_uid', '==', user.uid),
       where('building_id', '==', id),
       orderBy('version', 'desc')
     );
@@ -92,18 +95,22 @@ export default function BuildingDetailPage() {
       () => { setUwLoading(false); }
     );
     return () => unsub();
-  }, [id]);
+  }, [id, user]);
 
   useEffect(() => {
-    if (!id) return;
-    const q = query(collection(db, 'contacts'), where('related_buildings', 'array-contains', id));
+    if (!id || !user) return;
+    const q = query(
+      collection(db, 'contacts'),
+      where('owner_uid', '==', user.uid),
+      where('related_buildings', 'array-contains', id)
+    );
     const unsub = onSnapshot(q, (snap) => {
       const out: (Contact & { id: string })[] = [];
       snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Contact) }));
       setContacts(out);
     });
     return () => unsub();
-  }, [id]);
+  }, [id, user]);
 
   async function patchBuilding(p: Partial<Building>) {
     if (!id) return;
@@ -111,21 +118,23 @@ export default function BuildingDetailPage() {
   }
 
   async function createInitialUnderwriting() {
-    if (!id || !building) return;
+    if (!id || !building || !user) return;
     const uw = blankUnderwriting({ ...building, id });
     const ref = await addDoc(collection(db, 'underwriting'), {
       ...uw,
+      owner_uid: user.uid,
       created_at: Timestamp.fromMillis(Date.now())
     });
     setUnderwriting({ ...uw, id: ref.id });
   }
 
   async function saveNewVersion(uw: Underwriting) {
-    if (!id) return;
+    if (!id || !user) return;
     const nextVersion = (underwriting?.version ?? 0) + 1;
     const payload = { ...uw, version: nextVersion, building_id: id };
     await setDoc(doc(collection(db, 'underwriting')), {
       ...payload,
+      owner_uid: user.uid,
       created_at: Timestamp.fromMillis(Date.now())
     });
     // Also update building-level rollup

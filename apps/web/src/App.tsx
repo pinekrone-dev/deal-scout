@@ -8,6 +8,7 @@ import ContactsPage from './pages/ContactsPage';
 import ContactDetailPage from './pages/ContactDetailPage';
 import DealsPage from './pages/DealsPage';
 import IngestPage from './pages/IngestPage';
+import SettingsPage from './pages/SettingsPage';
 import NotFoundPage from './pages/NotFoundPage';
 
 function Protected({ children }: { children: JSX.Element }) {
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/contacts/:id" element={<ContactDetailPage />} />
           <Route path="/deals" element={<DealsPage />} />
           <Route path="/ingest/:ingestionId" element={<IngestPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<NotFoundPage />} />
       </Routes>

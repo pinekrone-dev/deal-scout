@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { addDoc, collection, onSnapshot, orderBy, query, Timestamp } from 'firebase/firestore';
+import { addDoc, collection, onSnapshot, orderBy, query, Timestamp, where } from 'firebase/firestore';
 import { db } from '../lib/firebase';
 import { uploadOM } from '../lib/api';
+import { useAuth } from '../lib/auth';
 import type { Building, AssetClass } from '../types';
 import { ASSET_CLASSES } from '../types';
 import { fmtNum, fmtPct, fmtUSD } from '../lib/format';
@@ -10,6 +11,7 @@ import { fmtNum, fmtPct, fmtUSD } from '../lib/format';
 type Row = Building & { id: string };
 
 export default function BuildingsPage() {
+  const { user } = useAuth();
   const [rows, setRows] = useState<Row[]>([]);
   const [filter, setFilter] = useState('');
   const [assetFilter, setAssetFilter] = useState<AssetClass | ''>('');
@@ -18,14 +20,19 @@ export default function BuildingsPage() {
   const nav = useNavigate();
 
   useEffect(() => {
-    const q = query(collection(db, 'buildings'), orderBy('updated_at', 'desc'));
+    if (!user) return;
+    const q = query(
+      collection(db, 'buildings'),
+      where('owner_uid', '==', user.uid),
+      orderBy('updated_at', 'desc')
+    );
     const unsub = onSnapshot(q, (snap) => {
       const out: Row[] = [];
       snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Building) }));
       setRows(out);
     });
     return () => unsub();
-  }, []);
+  }, [user]);
 
   const filtered = useMemo(() => {
     const f = filter.toLowerCase();
@@ -42,6 +49,7 @@ export default function BuildingsPage() {
   }, [rows, filter, assetFilter]);
 
   async function createBlank() {
+    if (!user) return;
     const now = Date.now();
     const payload: Building = {
       address: 'New Building',
@@ -51,6 +59,7 @@ export default function BuildingsPage() {
     };
     const ref = await addDoc(collection(db, 'buildings'), {
       ...payload,
+      owner_uid: user.uid,
       created_at: Timestamp.fromMillis(now),
       updated_at: Timestamp.fromMillis(now)
     });

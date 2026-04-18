@@ -99,11 +99,19 @@ def _coerce_json(text: str) -> dict[str, Any]:
 
 def extract_from_documents(
     docs: Iterable[tuple[str, bytes, str | None]],
+    api_key: str | None = None,
 ) -> dict[str, Any]:
-    """Run Gemini 2.5 Pro vision extraction across one or more documents."""
-    if not settings.gemini_api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    client = genai.Client(api_key=settings.gemini_api_key)
+    """Run Gemini 2.5 Pro vision extraction across one or more documents.
+
+    api_key: per-user key from Firestore. Falls back to settings.gemini_api_key
+    (Secret Manager) if the per-user key is not set.
+    """
+    key = api_key or settings.gemini_api_key
+    if not key:
+        raise RuntimeError(
+            "No Gemini API key. Add your key on the Settings page before uploading an OM."
+        )
+    client = genai.Client(api_key=key)
 
     parts: list[Any] = []
     for name, raw, mime in docs:

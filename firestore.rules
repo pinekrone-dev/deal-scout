@@ -1,29 +1,60 @@
 rules_version = '2';
 
+// Deal Scout CRM. Multi-tenant: every doc has owner_uid = creating user's uid.
+// Any authenticated Firebase user can sign in. Users can only read/write docs they own.
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isAllowed() {
-      return request.auth != null && request.auth.token.email_verified == true
-        && (
-          request.auth.token.email == 'pinekrone@gmail.com'
-          || request.auth.token.email.matches('.*@realestateaistudio[.]com$')
-        );
+
+    function signedIn() {
+      return request.auth != null && request.auth.uid != null;
     }
 
-    match /buildings/{doc=**} {
-      allow read, write: if isAllowed();
+    function isOwner(data) {
+      return signedIn() && data.owner_uid == request.auth.uid;
     }
-    match /contacts/{doc=**} {
-      allow read, write: if isAllowed();
+
+    function willOwn() {
+      return signedIn() && request.resource.data.owner_uid == request.auth.uid;
     }
-    match /deals/{doc=**} {
-      allow read, write: if isAllowed();
+
+    // Per-user profile. Stores personal settings such as the user's Gemini API key.
+    match /users/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
     }
-    match /underwriting/{doc=**} {
-      allow read, write: if isAllowed();
+
+    match /buildings/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if willOwn();
+      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if isOwner(resource.data);
     }
-    match /om_ingestions/{doc=**} {
-      allow read, write: if isAllowed();
+
+    match /contacts/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if willOwn();
+      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if isOwner(resource.data);
+    }
+
+    match /deals/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if willOwn();
+      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if isOwner(resource.data);
+    }
+
+    match /underwriting/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if willOwn();
+      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if isOwner(resource.data);
+    }
+
+    match /om_ingestions/{id} {
+      allow read: if isOwner(resource.data);
+      allow create: if willOwn();
+      allow update: if isOwner(resource.data) && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if isOwner(resource.data);
     }
   }
 }

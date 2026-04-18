@@ -19,6 +19,4 @@ export const storage: FirebaseStorage = getStorage(app);
 export const googleProvider = new GoogleAuthProvider();
 googleProvider.setCustomParameters({ prompt: 'select_account' });
 
-export const allowedDomain = (import.meta.env.VITE_ALLOWED_DOMAIN as string | undefined) ?? 'realestateaistudio.com';
-export const allowedEmail = (import.meta.env.VITE_ALLOWED_EMAIL as string | undefined) ?? 'pinekrone@gmail.com';
 export const apiBase = (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? '';

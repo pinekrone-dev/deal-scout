@@ -161,6 +161,55 @@ def _safe_returns(r) -> dict[str, float | None]:
 # ---------- Ingest ----------
 
 
+def _user_gemini_key(uid: str) -> str | None:
+    """Read the per-user Gemini API key from users/{uid}.gemini_api_key."""
+    try:
+        snap = get_db().collection("users").document(uid).get()
+        if not snap.exists:
+            return None
+        data = snap.to_dict() or {}
+        key = data.get("gemini_api_key")
+        return key.strip() if isinstance(key, str) and key.strip() else None
+    except Exception:
+        log.exception("user_gemini_key read failed for uid=%s", uid)
+        return None
+
+
+@app.get("/api/settings")
+def get_settings(user: dict = Depends(require_user)) -> dict[str, Any]:
+    """Return whether the current user has configured a Gemini key (never the key itself)."""
+    key = _user_gemini_key(user["uid"])
+    fallback = bool(settings.gemini_api_key)
+    return {
+        "has_user_key": bool(key),
+        "has_fallback_key": fallback,
+        "model": settings.gemini_model,
+        "email": user.get("email"),
+    }
+
+
+@app.post("/api/settings")
+def save_settings(
+    payload: dict[str, Any],
+    user: dict = Depends(require_user),
+) -> dict[str, Any]:
+    """Persist the user's Gemini key (or clear it with empty string)."""
+    key = payload.get("gemini_api_key")
+    if key is not None and not isinstance(key, str):
+        raise HTTPException(status_code=400, detail="gemini_api_key must be a string")
+    db = get_db()
+    ref = db.collection("users").document(user["uid"])
+    ref.set(
+        {
+            "gemini_api_key": (key or "").strip() or None,
+            "email": user.get("email"),
+            "updated_at": gcfs.SERVER_TIMESTAMP,
+        },
+        merge=True,
+    )
+    return {"ok": True, "has_user_key": bool((key or "").strip())}
+
+
 @app.post("/api/ingest")
 async def create_ingest(
     background: BackgroundTasks,
@@ -169,6 +218,14 @@ async def create_ingest(
 ) -> dict[str, Any]:
     if not files:
         raise HTTPException(status_code=400, detail="No files uploaded")
+
+    # Require a key before we even upload. Fail fast with a clear message.
+    user_key = _user_gemini_key(user["uid"])
+    if not user_key and not settings.gemini_api_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Add your Gemini API key on the Settings page before uploading an OM.",
+        )
 
     db = get_db()
     bucket = get_bucket()
@@ -188,6 +245,7 @@ async def create_ingest(
 
     db.collection("om_ingestions").document(ingestion_id).set(
         {
+            "owner_uid": user["uid"],
             "storage_path": storage_paths,
             "building_id": None,
             "extraction_status": "pending",
@@ -199,16 +257,20 @@ async def create_ingest(
         }
     )
 
-    background.add_task(_run_extraction, ingestion_id, doc_payload)
+    background.add_task(_run_extraction, ingestion_id, doc_payload, user_key)
     return {"ingestion_id": ingestion_id}
 
 
-def _run_extraction(ingestion_id: str, docs: list[tuple[str, bytes, str]]) -> None:
+def _run_extraction(
+    ingestion_id: str,
+    docs: list[tuple[str, bytes, str]],
+    api_key: str | None,
+) -> None:
     db = get_db()
     ref = db.collection("om_ingestions").document(ingestion_id)
     ref.update({"extraction_status": "running"})
     try:
-        extracted = extract_from_documents(docs)
+        extracted = extract_from_documents(docs, api_key=api_key)
         ref.update({"extraction_status": "done", "raw_extraction": extracted})
     except Exception as exc:  # pragma: no cover - external service failure path
         log.exception("Extraction failed for %s", ingestion_id)
@@ -222,6 +284,8 @@ def get_ingest(ingestion_id: str, user: dict = Depends(require_user)) -> dict[st
     if not snap.exists:
         raise HTTPException(status_code=404, detail="Ingestion not found")
     data = snap.to_dict() or {}
+    if data.get("owner_uid") and data["owner_uid"] != user["uid"]:
+        raise HTTPException(status_code=404, detail="Ingestion not found")
     return {
         "id": ingestion_id,
         "extraction_status": data.get("extraction_status", "pending"),
@@ -243,6 +307,9 @@ def confirm_ingest(
         ingest_snap = ingest_ref.get()
         if not ingest_snap.exists:
             raise HTTPException(status_code=404, detail="Ingestion not found")
+        ingest_data = ingest_snap.to_dict() or {}
+        if ingest_data.get("owner_uid") and ingest_data["owner_uid"] != user["uid"]:
+            raise HTTPException(status_code=404, detail="Ingestion not found")
 
         building_in = payload.get("building") or {}
         address = (building_in.get("address") or "").strip()
@@ -251,6 +318,7 @@ def confirm_ingest(
 
         asset_class = building_in.get("asset_class") or "multifamily"
         building_doc_raw = {
+            "owner_uid": user["uid"],
             "address": address,
             "city": building_in.get("city"),
             "state": building_in.get("state"),
@@ -292,6 +360,7 @@ def confirm_ingest(
                 continue
             contact_ref = db.collection("contacts").document()
             contact_doc = _clean_doc({
+                "owner_uid": user["uid"],
                 "name": name,
                 "role": c.get("role") or "other",
                 "firm": c.get("firm"),
@@ -335,6 +404,7 @@ def confirm_ingest(
                 proforma["noi"] = 0.0
             returns = compute_returns(building_doc, ttm, proforma, assumptions)
             uw_payload = _deep_clean({
+                "owner_uid": user["uid"],
                 "building_id": building_id,
                 "asset_class": asset_class,
                 "ttm": ttm,
@@ -354,6 +424,7 @@ def confirm_ingest(
             try:
                 uw_ref = db.collection("underwriting").document()
                 uw_ref.set(_deep_clean({
+                    "owner_uid": user["uid"],
                     "building_id": building_id,
                     "asset_class": asset_class,
                     "ttm": ttm,
@@ -400,6 +471,8 @@ def calc_underwriting(
     if not b_snap.exists:
         raise HTTPException(status_code=404, detail="Building not found")
     building = b_snap.to_dict() or {}
+    if building.get("owner_uid") and building["owner_uid"] != user["uid"]:
+        raise HTTPException(status_code=404, detail="Building not found")
     ttm = payload.get("ttm") or {"revenue": [], "expenses": []}
     ttm["noi"] = compute_noi(ttm)
     assumptions = payload.get("assumptions") or default_assumptions(building.get("asset_class", "multifamily"))
@@ -412,6 +485,29 @@ def calc_underwriting(
         "assumptions": assumptions,
         "returns": _safe_returns(returns),
     }
+
+
+# ---------- One-time migration: stamp owner_uid on legacy docs ----------
+
+
+@app.post("/api/admin/migrate")
+def migrate_ownerless(user: dict = Depends(require_user)) -> dict[str, Any]:
+    """Stamp owner_uid = caller's uid on all docs that have none.
+    Only the first user to call this on a legacy doc claims it.
+    """
+    db = get_db()
+    uid = user["uid"]
+    stamped: dict[str, int] = {}
+    for coll in ("buildings", "contacts", "deals", "underwriting", "om_ingestions"):
+        n = 0
+        for doc in db.collection(coll).stream():
+            data = doc.to_dict() or {}
+            if not data.get("owner_uid"):
+                db.collection(coll).document(doc.id).update({"owner_uid": uid})
+                n += 1
+        stamped[coll] = n
+    log.info("migrate_ownerless uid=%s stamped=%s", uid, stamped)
+    return {"ok": True, "stamped": stamped, "claimed_by": uid}
 
 
 @app.exception_handler(Exception)

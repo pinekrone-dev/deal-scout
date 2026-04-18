@@ -20,6 +20,7 @@ export default function Shell() {
             <NavLink to="/buildings" className={linkCls}>Buildings</NavLink>
             <NavLink to="/deals" className={linkCls}>Deals</NavLink>
             <NavLink to="/contacts" className={linkCls}>Contacts</NavLink>
+            <NavLink to="/settings" className={linkCls}>Settings</NavLink>
           </nav>
           <div className="flex items-center gap-3 text-sm">
             <span className="text-ink-500 hidden md:inline">{user?.email}</span>

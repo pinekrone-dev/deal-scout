@@ -5,7 +5,7 @@ import {
   signOut as fbSignOut,
   type User
 } from 'firebase/auth';
-import { allowedDomain, allowedEmail, auth, googleProvider } from './firebase';
+import { auth, googleProvider } from './firebase';
 
 type AuthCtx = {
   user: User | null;
@@ -17,29 +17,15 @@ type AuthCtx = {
 
 const Ctx = createContext<AuthCtx | null>(null);
 
-function isAllowed(user: User): boolean {
-  const email = user.email?.toLowerCase() ?? '';
-  if (!email) return false;
-  if (allowedEmail && email === allowedEmail.toLowerCase()) return true;
-  if (allowedDomain && email.endsWith('@' + allowedDomain.toLowerCase())) return true;
-  return false;
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
-      if (u && !isAllowed(u)) {
-        setError('This Google account is not authorized for this workspace.');
-        await fbSignOut(auth);
-        setUser(null);
-      } else {
-        setUser(u);
-        setError(null);
-      }
+    const unsub = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setError(null);
       setLoading(false);
     });
     return () => unsub();
@@ -53,11 +39,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       async signIn() {
         setError(null);
         try {
-          const result = await signInWithPopup(auth, googleProvider);
-          if (!isAllowed(result.user)) {
-            await fbSignOut(auth);
-            setError('This Google account is not authorized for this workspace.');
-          }
+          await signInWithPopup(auth, googleProvider);
         } catch (e: unknown) {
           setError(e instanceof Error ? e.message : 'Sign in failed');
         }

@@ -8,9 +8,11 @@ import {
   orderBy,
   query,
   Timestamp,
-  updateDoc
+  updateDoc,
+  where
 } from 'firebase/firestore';
 import { db } from '../lib/firebase';
+import { useAuth } from '../lib/auth';
 import type { Building, Deal, DealStatus } from '../types';
 import { DEAL_STATUSES } from '../types';
 import { fmtUSD } from '../lib/format';
@@ -18,27 +20,35 @@ import { fmtUSD } from '../lib/format';
 type DealRow = Deal & { id: string };
 
 export default function DealsPage() {
+  const { user } = useAuth();
   const [deals, setDeals] = useState<DealRow[]>([]);
   const [buildings, setBuildings] = useState<Record<string, Building>>({});
 
   useEffect(() => {
-    const q = query(collection(db, 'deals'), orderBy('updated_at', 'desc'));
+    if (!user) return;
+    const q = query(
+      collection(db, 'deals'),
+      where('owner_uid', '==', user.uid),
+      orderBy('updated_at', 'desc')
+    );
     const unsub = onSnapshot(q, (snap) => {
       const out: DealRow[] = [];
       snap.forEach((d) => out.push({ id: d.id, ...(d.data() as Deal) }));
       setDeals(out);
     });
     return () => unsub();
-  }, []);
+  }, [user]);
 
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, 'buildings'), (snap) => {
+    if (!user) return;
+    const q = query(collection(db, 'buildings'), where('owner_uid', '==', user.uid));
+    const unsub = onSnapshot(q, (snap) => {
       const map: Record<string, Building> = {};
       snap.forEach((d) => (map[d.id] = d.data() as Building));
       setBuildings(map);
     });
     return () => unsub();
-  }, []);
+  }, [user]);
 
   const byStatus = useMemo(() => {
     const out: Record<DealStatus, DealRow[]> = {
@@ -51,11 +61,13 @@ export default function DealsPage() {
   }, [deals]);
 
   async function addDeal(status: DealStatus) {
+    if (!user) return;
     const now = Date.now();
     await addDoc(collection(db, 'deals'), {
       building_id: '',
       contact_ids: [],
       status,
+      owner_uid: user.uid,
       created_at: Timestamp.fromMillis(now),
       updated_at: Timestamp.fromMillis(now)
     });

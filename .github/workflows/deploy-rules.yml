@@ -1,0 +1,86 @@
+name: Deploy Firestore rules
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firestore.rules"
+      - ".github/workflows/deploy-rules.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+          token_format: access_token
+
+      - name: Deploy rules via firebaserules REST API
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: |
+          set -euo pipefail
+          RULES_FILE="firestore.rules"
+          test -f "$RULES_FILE"
+
+          # JSON-encode the rules file contents
+          python3 - <<'PY' > /tmp/ruleset.json
+          import json, os
+          with open("firestore.rules","r") as f:
+              src = f.read()
+          body = {
+              "source": {
+                  "files": [
+                      {"name": "firestore.rules", "content": src}
+                  ]
+              }
+          }
+          print(json.dumps(body))
+          PY
+
+          echo "Creating ruleset..."
+          CREATE_RESP=$(curl -sS -X POST \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/ruleset.json \
+            "https://firebaserules.googleapis.com/v1/projects/${GCP_PROJECT_ID}/rulesets")
+          echo "$CREATE_RESP"
+          RULESET_NAME=$(echo "$CREATE_RESP" | python3 -c "import sys,json; print(json.load(sys.stdin)['name'])")
+          echo "Ruleset: ${RULESET_NAME}"
+
+          RELEASE="projects/${GCP_PROJECT_ID}/releases/cloud.firestore"
+          echo "Updating release ${RELEASE}..."
+          cat > /tmp/release.json <<JSON
+          {"release": {"name": "${RELEASE}", "rulesetName": "${RULESET_NAME}"}}
+          JSON
+
+          # Try PATCH (update existing release); if it doesn't exist, create it.
+          PATCH_RESP=$(curl -sS -X PATCH \
+            -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/release.json \
+            "https://firebaserules.googleapis.com/v1/${RELEASE}")
+          echo "$PATCH_RESP"
+
+          if echo "$PATCH_RESP" | grep -q '"code": 404'; then
+            echo "Release not found, creating..."
+            curl -sS -X POST \
+              -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+              -H "Content-Type: application/json" \
+              --data-binary @/tmp/release.json \
+              "https://firebaserules.googleapis.com/v1/projects/${GCP_PROJECT_ID}/releases"
+          fi
+          echo "Rules deployed."
