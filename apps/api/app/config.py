@@ -24,7 +24,7 @@ class Settings:
 def load_settings() -> Settings:
     return Settings(
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
-        gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-pro"),
+        gemini_model=os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview"),
         firebase_project_id=os.getenv("FIREBASE_PROJECT_ID", "reais---prospecter"),
         firebase_storage_bucket=os.getenv("FIREBASE_STORAGE_BUCKET", "reais---prospecter.firebasestorage.app"),
         allowed_origins=_csv(

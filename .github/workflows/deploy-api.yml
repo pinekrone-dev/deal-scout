@@ -36,7 +36,7 @@ jobs:
           source: apps/api
           region: ${{ secrets.GCP_REGION }}
           project_id: ${{ secrets.GCP_PROJECT_ID }}
-          flags: "--allow-unauthenticated --port=8080 --set-secrets=GEMINI_API_KEY=gemini-api-key:latest"
+          flags: "--allow-unauthenticated --port=8080 --set-secrets=GEMINI_API_KEY=gemini-api-key:latest --set-env-vars=GEMINI_MODEL=gemini-3.1-pro-preview"
 
       - name: Show URL
         run: echo "API URL ${{ steps.deploy.outputs.url }}"

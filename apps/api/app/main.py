@@ -861,6 +861,198 @@ def confirm_ingest(
         raise HTTPException(status_code=500, detail=f"confirm failed: {exc}") from exc
 
 
+# ---------- Re-extract OM into existing building ----------
+
+
+def _rebuild_underwriting(
+    building_id: str,
+    building: dict[str, Any],
+    extracted: dict[str, Any],
+    owner_uid: str,
+) -> str | None:
+    """Given a fresh extraction dict, (re)write the underwriting doc for a
+    building. Reuses the same helpers that confirm_ingest uses so the shape
+    is identical. Returns the underwriting doc id (new or existing)."""
+    db = get_db()
+    asset_class = building.get("asset_class") or "multifamily"
+    financials = extracted.get("financials") or {}
+
+    ttm = _clean_statement(financials.get("ttm") or {"revenue": [], "expenses": []})
+    ttm_monthly = _clean_monthly_statement(financials.get("ttm_monthly"), source="om")
+    if ttm_monthly:
+        reconciled = _monthly_to_annual_totals(ttm_monthly)
+        if reconciled and (reconciled.get("revenue") or reconciled.get("expenses")):
+            ttm = _clean_statement(reconciled)
+
+    try:
+        ttm["noi"] = float(compute_noi(ttm))
+        if not math.isfinite(ttm["noi"]):
+            ttm["noi"] = 0.0
+    except Exception:
+        ttm["noi"] = 0.0
+
+    ttm_period_raw = financials.get("ttm_period") or {}
+    if isinstance(ttm_period_raw, dict):
+        ttm_period = {
+            "start_month": str(ttm_period_raw.get("start_month") or "") or None,
+            "end_month": str(ttm_period_raw.get("end_month") or "") or None,
+            "label": str(ttm_period_raw.get("label") or "") or None,
+        }
+    else:
+        ttm_period = {}
+
+    assumptions = default_assumptions(asset_class)
+    om_assumptions = _clean_assumptions(extracted.get("assumptions"))
+    if om_assumptions:
+        assumptions = {**assumptions, **om_assumptions}
+
+    if not ttm_monthly and (ttm.get("revenue") or ttm.get("expenses")):
+        ttm_monthly = _spread_annual_to_monthly(ttm, months=None, source="derived")
+
+    proforma_monthly = _clean_monthly_statement(financials.get("proforma_12mo"), source="om")
+    if not proforma_monthly and ttm_monthly:
+        proforma_monthly = _derive_proforma_monthly(ttm_monthly, assumptions)
+
+    rent_roll = _clean_rent_roll(extracted.get("rent_roll"))
+    lease_roll = _clean_lease_roll(extracted.get("lease_roll"))
+
+    if proforma_monthly:
+        proforma = _clean_statement(_monthly_to_annual_totals(proforma_monthly) or {"revenue": [], "expenses": []})
+    else:
+        proforma = _clean_statement(build_proforma_from_ttm(ttm, assumptions))
+    try:
+        proforma["noi"] = float(compute_noi(proforma))
+        if not math.isfinite(proforma["noi"]):
+            proforma["noi"] = 0.0
+    except Exception:
+        proforma["noi"] = 0.0
+
+    returns = compute_returns(building, ttm, proforma, assumptions)
+
+    payload = _deep_clean({
+        "owner_uid": owner_uid,
+        "building_id": building_id,
+        "asset_class": asset_class,
+        "ttm": ttm,
+        "ttm_period": ttm_period,
+        "ttm_monthly": ttm_monthly,
+        "proforma_12mo": proforma,
+        "proforma_12mo_monthly": proforma_monthly,
+        "assumptions": assumptions,
+        "rent_roll": rent_roll,
+        "lease_roll": lease_roll,
+        "returns": _safe_returns(returns),
+        "updated_at": gcfs.SERVER_TIMESTAMP,
+    })
+
+    # Update the most recent existing underwriting doc for this building,
+    # or create a new one if none exists.
+    existing_id: str | None = None
+    for uw in db.collection("underwriting").where(
+        filter=gcfs.FieldFilter("building_id", "==", building_id)
+    ).stream():
+        existing_id = uw.id
+        break
+
+    if existing_id:
+        db.collection("underwriting").document(existing_id).set(payload, merge=True)
+        return existing_id
+    payload["version"] = 1
+    payload["created_at"] = gcfs.SERVER_TIMESTAMP
+    new_ref = db.collection("underwriting").document()
+    new_ref.set(payload)
+    return new_ref.id
+
+
+@app.post("/api/buildings/{building_id}/reextract")
+def reextract_building(
+    building_id: str,
+    user: dict = Depends(require_user),
+) -> dict[str, Any]:
+    """Re-run the OM extraction on a building's stored documents and refresh
+    its underwriting record. Useful when the model has been upgraded or the
+    extraction prompt has been improved since the building was first ingested."""
+    db = get_db()
+    b_ref = db.collection("buildings").document(building_id)
+    b_snap = b_ref.get()
+    if not b_snap.exists:
+        raise HTTPException(status_code=404, detail="Building not found")
+    building = b_snap.to_dict() or {}
+    owner = building.get("owner_uid")
+    if owner and not _can_access(user["uid"], owner):
+        raise HTTPException(status_code=404, detail="Building not found")
+    if owner:
+        _require_permission(user["uid"], owner, "underwrite")
+
+    doc_paths = [str(p) for p in (building.get("documents") or []) if p]
+    if not doc_paths:
+        raise HTTPException(
+            status_code=400,
+            detail="This building has no stored OM documents to re-extract from.",
+        )
+
+    bucket = get_bucket()
+    docs: list[tuple[str, bytes, str]] = []
+    bucket_prefix = f"gs://{settings.firebase_storage_bucket}/"
+    for gs_uri in doc_paths:
+        if gs_uri.startswith(bucket_prefix):
+            blob_path = gs_uri[len(bucket_prefix):]
+        elif gs_uri.startswith("gs://"):
+            # Different bucket - skip silently
+            log.warning("reextract: skipping foreign bucket path %s", gs_uri)
+            continue
+        else:
+            blob_path = gs_uri
+        try:
+            blob = bucket.blob(blob_path)
+            raw = blob.download_as_bytes()
+        except Exception:
+            log.exception("reextract: failed to fetch %s", blob_path)
+            continue
+        mime = "application/pdf" if blob_path.lower().endswith(".pdf") else "application/octet-stream"
+        docs.append((blob_path.rsplit("/", 1)[-1], raw, mime))
+
+    if not docs:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not load any of the stored OM documents from Cloud Storage.",
+        )
+
+    api_key = _user_gemini_key(user["uid"])
+    try:
+        extracted = extract_from_documents(docs, api_key=api_key)
+    except Exception as e:
+        log.exception("reextract extraction failed building=%s", building_id)
+        raise HTTPException(status_code=502, detail=f"Gemini extraction failed: {e}")
+
+    uw_id = _rebuild_underwriting(building_id, building, extracted, owner or user["uid"])
+
+    # Opportunistically refresh any freshly-seen building fields the user hadn't
+    # filled in yet (never overwrite values that were already set).
+    b_patch: dict[str, Any] = {}
+    extracted_b = extracted.get("building") or {}
+    for field in (
+        "city", "state", "zip", "units", "sf", "nrsf", "keys",
+        "year_built", "year_renovated", "occupancy", "asking_price",
+        "current_noi", "cap_rate", "adr", "revpar",
+    ):
+        v = _num_or_none(extracted_b.get(field)) if field not in ("city", "state", "zip") else (extracted_b.get(field) or None)
+        if v is not None and not building.get(field):
+            b_patch[field] = v
+    if b_patch:
+        b_patch["updated_at"] = gcfs.SERVER_TIMESTAMP
+        b_ref.update(b_patch)
+
+    return {
+        "ok": True,
+        "building_id": building_id,
+        "underwriting_id": uw_id,
+        "docs_processed": len(docs),
+        "building_fields_updated": list(b_patch.keys()),
+        "model": settings.gemini_model,
+    }
+
+
 # ---------- Underwriting calc ----------
 
 

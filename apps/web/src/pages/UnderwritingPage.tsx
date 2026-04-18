@@ -80,6 +80,7 @@ export default function UnderwritingPage() {
   const [uw, setUw] = useState<Underwriting | null>(null);
   const [loadingUw, setLoadingUw] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [reextracting, setReextracting] = useState(false);
 
   // Live list of buildings in the active workspace.
   useEffect(() => {
@@ -182,6 +183,31 @@ export default function UnderwritingPage() {
     }
   }
 
+  async function reextractOm() {
+    if (!selectedId) return;
+    if (!can('underwrite')) {
+      alert("You don't have permission to re-extract underwriting in this workspace.");
+      return;
+    }
+    if (!confirm('Re-run Gemini extraction on the stored OM documents? This will overwrite the current underwriting record.')) {
+      return;
+    }
+    setReextracting(true);
+    try {
+      const res = await apiFetch(`/api/buildings/${selectedId}/reextract`, { method: 'POST' });
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(`${res.status} ${txt}`);
+      }
+      const body = await res.json();
+      alert(`Re-extraction complete (${body.docs_processed} doc(s), model ${body.model}). The underwriting tab will refresh automatically.`);
+    } catch (e) {
+      alert(`Re-extract failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setReextracting(false);
+    }
+  }
+
   async function exportXlsx() {
     if (!selectedId || !selected) return;
     setExporting(true);
@@ -218,6 +244,14 @@ export default function UnderwritingPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            className="btn"
+            disabled={!selectedId || reextracting || !can('underwrite')}
+            onClick={reextractOm}
+            title="Re-run Gemini vision extraction on the stored OM documents and rebuild this underwriting record"
+          >
+            {reextracting ? 'Re-extracting...' : 'Re-extract from OM'}
+          </button>
           <button
             className="btn"
             disabled={!selectedId || exporting}
